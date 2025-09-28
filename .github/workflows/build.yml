@@ -54,39 +54,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow requests beautifulsoup4 lxml
 
-      # Cross-platform icon generation
-      - name: Generate Icons
-        run: |
-          echo "from PIL import Image" > Clone-Website-to-Docker-Tool/make_icons.py
-          echo "import os, sys" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "os.makedirs('images', exist_ok=True)" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "img_path = 'images/icon.png'" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "ico_path = 'icon.ico'" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "try:" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    img = Image.open(img_path)" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "except:" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    img = Image.new('RGBA', (512, 512), (0, 122, 204, 255))" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "img.save(ico_path, format='ICO', sizes=[(16,16),(32,32),(64,64),(128,128),(256,256),(512,512)])" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "if sys.platform == 'darwin':" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    icns_path = 'icon.icns'" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    iconset = 'images/iconset'" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    os.makedirs(iconset, exist_ok=True)" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    for size in [16,32,64,128,256,512,1024]:" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "        resized = img.resize((size, size))" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "        resized.save(f'{iconset}/icon_{size}x{size}.png')" >> Clone-Website-to-Docker-Tool/make_icons.py
-          echo "    os.system(f'iconutil -c icns {iconset} -o {icns_path}')" >> Clone-Website-to-Docker-Tool/make_icons.py
-          python Clone-Website-to-Docker-Tool/make_icons.py
 
       - name: Build Executable
-        run: pyinstaller Clone-Website-to-Docker-Tool/cw2dt.spec
+        run: |
+          pyinstaller Clone-Website-to-Docker-Tool/cw2dt.spec \
+            --icon=Clone-Website-to-Docker-Tool/icon.ico
 
       - name: Package Executable (Windows)
         if: matrix.platform == 'Windows'
-        run: zip -j CW2DT-Windows.zip Clone-Website-to-Docker-Tool/dist/cw2dt.exe
+        run: zip -j CW2DT-Windows.zip Clone-Website-to-Docker-Tool/dist/cw2dt.exe Clone-Website-to-Docker-Tool/icon.ico
 
       - name: Package Executable (Linux/macOS)
         if: matrix.platform != 'Windows'
-        run: zip -j CW2DT-${{ matrix.platform }}.zip Clone-Website-to-Docker-Tool/dist/cw2dt*
+        run: zip -j CW2DT-${{ matrix.platform }}.zip Clone-Website-to-Docker-Tool/dist/cw2dt* Clone-Website-to-Docker-Tool/icon.icns
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
