@@ -144,20 +144,23 @@ jobs:
         shell: bash
         run: pyinstaller --noconfirm cw2dt.spec
 
-      # Packaging steps with fallback + debugging
+      # Windows packaging now uses Compress-Archive
       - name: Package Windows
         if: matrix.platform == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          cd dist
-          echo "Contents of dist/ directory before packaging:"
-          ls -al
-          if [ -f cw2dt.exe ]; then
-            zip -j ../CW2DT-Windows.zip cw2dt.exe ../icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
-          else
-            echo "ERROR: Windows executable not found in dist/ after build!"
+          Write-Output "Contents of dist/ directory before packaging:"
+          Get-ChildItem dist
+          if (Test-Path "dist/cw2dt.exe") {
+            if (Test-Path "icon.ico") {
+              Compress-Archive -Path "dist/cw2dt.exe","icon.ico" -DestinationPath "CW2DT-Windows.zip" -Force
+            } else {
+              Compress-Archive -Path "dist/cw2dt.exe" -DestinationPath "CW2DT-Windows.zip" -Force
+            }
+          } else {
+            Write-Error "Windows executable not found in dist/"
             exit 1
-          fi
+          }
 
       - name: Package Linux
         if: matrix.platform == 'Linux'
