@@ -60,7 +60,7 @@ jobs:
 
       - name: Ensure project directories
         shell: bash
-        run: mkdir -p Clone-Website-to-Docker-Tool/images
+        run: mkdir -p images
 
       - name: Write PyInstaller spec
         shell: bash
@@ -73,20 +73,20 @@ jobs:
           def existing(path): 
               return path if os.path.exists(path) else None
 
-          # Data files
+          # Data files from root-level images folder
           image_files = []
           for fn in [
-              "Clone-Website-to-Docker-Tool/images/arrow_right.png",
-              "Clone-Website-to-Docker-Tool/images/docker_logo.png",
-              "Clone-Website-to-Docker-Tool/images/icon.png",
-              "Clone-Website-to-Docker-Tool/images/web_logo.png"
+              "images/arrow_right.png",
+              "images/docker_logo.png",
+              "images/icon.png",
+              "images/web_logo.png"
           ]:
               if os.path.exists(fn):
                   image_files.append((fn, "images"))
 
           datas = []
-          if existing("Clone-Website-to-Docker-Tool/VERSION.txt"):
-              datas.append(("Clone-Website-to-Docker-Tool/VERSION.txt", "."))
+          if existing("VERSION.txt"):
+              datas.append(("VERSION.txt", "."))
           datas += image_files
 
           hidden = (
@@ -95,7 +95,7 @@ jobs:
               collect_submodules("PySide6.QtWidgets")
           )
 
-          # Icon path: check repo root, fallback to None if missing
+          # Icons from root folder
           icon_path = None
           if os.name == "nt" and os.path.exists("icon.ico"):
               icon_path = "icon.ico"
