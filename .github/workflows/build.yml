@@ -1,4 +1,4 @@
-name: Build Clone Website to Docker Tool Multi-Platform
+name: Build Clone Website to Docker Tool (Multi-Platform)
 
 permissions:
   contents: write
@@ -20,30 +20,37 @@ jobs:
         include:
           - os: windows-latest
             platform: Windows
+            distpath: Clone-Website-to-Docker-Tool/dist
+            exec_glob: cw2dt.exe
           - os: macos-latest
             platform: macOS-ARM
+            distpath: Clone-Website-to-Docker-Tool/dist/cw2dt.app
+            exec_glob: cw2dt.app
           - os: macos-13
             platform: macOS-Intel
+            distpath: Clone-Website-to-Docker-Tool/dist/cw2dt.app
+            exec_glob: cw2dt.app
           - os: ubuntu-latest
             platform: Linux
+            distpath: Clone-Website-to-Docker-Tool/dist
+            exec_glob: cw2dt
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Cache pip
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          restore-keys: ${{ runner.os }}-pip-
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Linux dependencies
+      - name: Install OS deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -52,105 +59,127 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pillow requests beautifulsoup4 lxml
+          # If you have a requirements.txt, this will use it; otherwise fall back to explicit list.
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6; fi
 
-      - name: Ensure Clone-Website-to-Docker-Tool directory exists
-        run: mkdir -p Clone-Website-to-Docker-Tool/images
-
-      - name: Generate PyInstaller spec file
+      - name: Ensure project directories
         run: |
-          echo "# -*- mode: python ; coding: utf-8 -*-" > Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "import os" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "image_files = [" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    ('images/arrow_right.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    ('images/docker_logo.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    ('images/icon.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    ('images/web_logo.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "]" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "a = Analysis(" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    ['cw2dt.py']," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    pathex=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    binaries=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    datas=[('VERSION.txt', '.')] + image_files," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    hiddenimports=['PySide6']," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    hookspath=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    hooksconfig={}," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    runtime_hooks=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    excludes=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    noarchive=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    optimize=0," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo ")" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "pyz = PYZ(a.pure)" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "exe = EXE(" >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    pyz," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    a.scripts," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    a.binaries," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    a.datas," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    []," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    name='Clone Website to Docker Tool'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    version='VERSION.txt'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    debug=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    bootloader_ignore_signals=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    strip=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    upx=True," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    upx_exclude=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    runtime_tmpdir=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    console=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    disable_windowed_traceback=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    argv_emulation=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    target_arch=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    codesign_identity=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    entitlements_file=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    icon='icon.ico' if os.name == 'nt' else 'icon.icns'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo ")" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          mkdir -p Clone-Website-to-Docker-Tool/images
 
+      - name: Write PyInstaller spec
+        working-directory: Clone-Website-to-Docker-Tool
+        shell: bash
+        run: |
+          cat > cw2dt.spec << 'PYZSPEC'
+          # -*- mode: python ; coding: utf-8 -*-
+          import os
+          from PyInstaller.utils.hooks import collect_submodules
+          
+          # Data files that actually exist will be included.
+          def existing(path): 
+              return path if os.path.exists(path) else None
 
+          image_files = []
+          for fn in ["images/arrow_right.png","images/docker_logo.png","images/icon.png","images/web_logo.png"]:
+              if os.path.exists(fn):
+                  image_files.append((fn, "images"))
 
-      - name: Build Executable
-        run: pyinstaller Clone-Website-to-Docker-Tool/cw2dt.spec
+          datas = []
+          if existing("VERSION.txt"):
+              datas.append(("VERSION.txt", "."))
 
-      - name: Package Executable (Windows)
+          datas += image_files
+
+          hidden = ["PySide6"] + collect_submodules("PySide6")
+
+          a = Analysis(
+              ["cw2dt.py"],
+              pathex=[],
+              binaries=[],
+              datas=datas,
+              hiddenimports=hidden,
+              hookspath=[],
+              hooksconfig={},
+              runtime_hooks=[],
+              excludes=[],
+              noarchive=False,
+              optimize=0,
+          )
+          pyz = PYZ(a.pure)
+
+          # Consistent app/binary name everywhere
+          exe = EXE(
+              pyz,
+              a.scripts,
+              a.binaries,
+              a.datas,
+              [],
+              name="cw2dt",
+              debug=False,
+              bootloader_ignore_signals=False,
+              strip=False,
+              upx=True,
+              upx_exclude=[],
+              runtime_tmpdir=None,
+              console=False,
+              disable_windowed_traceback=False,
+              argv_emulation=False,
+              target_arch=None,
+              codesign_identity=None,
+              entitlements_file=None,
+              icon=("icon.ico" if os.name == "nt" else ("icon.icns" if os.path.exists("icon.icns") else None)),
+          )
+          PYZSPEC
+
+      - name: Build executable/bundle
+        working-directory: Clone-Website-to-Docker-Tool
+        run: pyinstaller --noconfirm cw2dt.spec
+
+      # Package per-OS
+      - name: Package (Windows)
         if: matrix.platform == 'Windows'
-        run: zip -j CW2DT-Windows.zip Clone-Website-to-Docker-Tool/dist/cw2dt.exe Clone-Website-to-Docker-Tool/icon.ico
+        run: |
+          cd Clone-Website-to-Docker-Tool/dist
+          zip -j ../../CW2DT-Windows.zip cw2dt.exe ../icon.ico 2>/dev/null || zip -j ../../CW2DT-Windows.zip cw2dt.exe
 
-      - name: Package Executable (Linux/macOS)
-        if: matrix.platform != 'Windows'
-        run: zip -j CW2DT-${{ matrix.platform }}.zip Clone-Website-to-Docker-Tool/dist/cw2dt* Clone-Website-to-Docker-Tool/icon.icns
+      - name: Package (Linux)
+        if: matrix.platform == 'Linux'
+        run: |
+          cd Clone-Website-to-Docker-Tool/dist
+          chmod +x cw2dt || true
+          zip -j ../../CW2DT-Linux.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../../CW2DT-Linux.zip cw2dt
 
-      - name: Upload Artifact
+      - name: Package (macOS)
+        if: startsWith(matrix.platform, 'macOS')
+        run: |
+          cd Clone-Website-to-Docker-Tool/dist
+          # Zip the .app bundle recursively
+          ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../../CW2DT-${{ matrix.platform }}.zip
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CW2DT-${{ matrix.platform }}
-          path: Clone-Website-to-Docker-Tool/CW2DT-${{ matrix.platform }}.zip
+          path: |
+            CW2DT-${{ matrix.platform }}.zip
+          if-no-files-found: error
 
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # Download all platform artifacts into the workspace root
       - uses: actions/download-artifact@v4
         with:
-          name: CW2DT-Windows
-      - uses: actions/download-artifact@v4
-        with:
-          name: CW2DT-macOS-Intel
-      - uses: actions/download-artifact@v4
-        with:
-          name: CW2DT-macOS-ARM
-      - uses: actions/download-artifact@v4
-        with:
-          name: CW2DT-Linux
+          pattern: CW2DT-*
+          merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             CW2DT-Windows.zip
             CW2DT-macOS-Intel.zip
             CW2DT-macOS-ARM.zip
             CW2DT-Linux.zip
-
