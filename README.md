@@ -205,7 +205,9 @@ pyinstaller -y --noconfirm --windowed --name "Clone Website to Docker Tool" cw2d
 
 ## 📄 License
 
-Add your preferred license (e.g., MIT) here.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+
 
 ---
 
@@ -221,5 +223,9 @@ Add your preferred license (e.g., MIT) here.
 ### Credits
 
 - **Nginx** (Alpine), **Docker**, **wget**, **PySide6**.  
-- App icon imagery: web → arrow → docker (place in `images/`).
 
+---
+
+## 👤 Author
+
+**Randy Northrup**
