@@ -1,159 +1,125 @@
-name: Build and Release Clone Website to Docker Tool
+name: Build Clone Website to Docker Tool Multi-Platform
 
 permissions:
   contents: write
 
 on:
   push:
-    tags:
-      - '*'
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-      - name: Cache images and icons
-        uses: actions/cache@v4
-        with:
-          path: |
-            images/
-            icon.ico
-            icon.icns
-          key: ${{ runner.os }}-assets-${{ hashFiles('images/*') }}-${{ hashFiles('icon.ico') }}-${{ hashFiles('icon.icns') }}
-          restore-keys: |
-            ${{ runner.os }}-assets-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-      - name: Build with PyInstaller
-        run: |
-          pyinstaller --onefile --windowed --icon icon.ico cw2dt.py
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cw2dt-windows
-          path: dist/cw2dt.exe
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows
+          - os: macos-latest
+            platform: macOS-ARM
+          - os: macos-13
+            platform: macOS-Intel
+          - os: ubuntu-latest
+            platform: Linux
 
-  build-macos:
-    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-      - name: Cache images and icons
-        uses: actions/cache@v4
-        with:
-          path: |
-            images/
-            icon.ico
-            icon.icns
-          key: ${{ runner.os }}-assets-${{ hashFiles('images/*') }}-${{ hashFiles('icon.ico') }}-${{ hashFiles('icon.icns') }}
-          restore-keys: |
-            ${{ runner.os }}-assets-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-      - name: Build with PyInstaller
-        run: |
-          pyinstaller --onedir --windowed --icon icon.icns cw2dt.py
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cw2dt-macos
-          path: dist/cw2dt.app
 
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         with:
-          path: |
-            ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
-      - name: Cache images and icons
-        uses: actions/cache@v4
-        with:
-          path: |
-            images/
-            icon.ico
-            icon.icns
-          key: ${{ runner.os }}-assets-${{ hashFiles('images/*') }}-${{ hashFiles('icon.ico') }}-${{ hashFiles('icon.icns') }}
-          restore-keys: |
-            ${{ runner.os }}-assets-
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - name: Install dependencies
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2
+
+      - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
-      - name: Build with PyInstaller
+          pip install pyinstaller pillow
+
+      # Cross-platform icon generation
+      - name: Generate Icons
         run: |
-          pyinstaller --onefile --windowed cw2dt.py
-      - name: Upload artifact
+          echo "from PIL import Image" > make_icons.py
+          echo "import os, sys" >> make_icons.py
+          echo "os.makedirs('images', exist_ok=True)" >> make_icons.py
+          echo "img_path = 'images/icon.png'" >> make_icons.py
+          echo "ico_path = 'icon.ico'" >> make_icons.py
+          echo "try:" >> make_icons.py
+          echo "    img = Image.open(img_path)" >> make_icons.py
+          echo "except:" >> make_icons.py
+          echo "    img = Image.new('RGBA', (512, 512), (0, 122, 204, 255))" >> make_icons.py
+          echo "img.save(ico_path, format='ICO', sizes=[(16,16),(32,32),(64,64),(128,128),(256,256),(512,512)])" >> make_icons.py
+          echo "if sys.platform == 'darwin':" >> make_icons.py
+          echo "    icns_path = 'icon.icns'" >> make_icons.py
+          echo "    iconset = 'images/iconset'" >> make_icons.py
+          echo "    os.makedirs(iconset, exist_ok=True)" >> make_icons.py
+          echo "    for size in [16,32,64,128,256,512,1024]:" >> make_icons.py
+          echo "        resized = img.resize((size, size))" >> make_icons.py
+          echo "        resized.save(f'{iconset}/icon_{size}x{size}.png')" >> make_icons.py
+          echo "    os.system(f'iconutil -c icns {iconset} -o {icns_path}')" >> make_icons.py
+          python make_icons.py
+
+      - name: Build Executable
+        run: pyinstaller cw2dt.spec
+
+      - name: Package Executable (Windows)
+        if: matrix.platform == 'Windows'
+        run: tar -czvf CW2DT-Windows.tar.gz dist/cw2dt.exe
+
+      - name: Package Executable (Linux/macOS)
+        if: matrix.platform != 'Windows'
+        run: tar -czvf CW2DT-${{ matrix.platform }}.tar.gz dist/cw2dt*
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cw2dt-linux
-          path: dist/cw2dt
+          name: CW2DT-${{ matrix.platform }}
+          path: CW2DT-${{ matrix.platform }}.tar.gz
 
   release:
-    needs: [build-windows, build-macos, build-linux]
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: cw2dt-windows
-          path: dist/
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
+          name: CW2DT-Windows
+      - uses: actions/download-artifact@v4
         with:
-          name: cw2dt-macos
-          path: dist/
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
+          name: CW2DT-macOS-Intel
+      - uses: actions/download-artifact@v4
         with:
-          name: cw2dt-linux
-          path: dist/
+          name: CW2DT-macOS-ARM
+      - uses: actions/download-artifact@v4
+        with:
+          name: CW2DT-Linux
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/cw2dt.exe
-            dist/cw2dt.app
-            dist/cw2dt
+            CW2DT-Windows.tar.gz
+            CW2DT-macOS-Intel.tar.gz
+            CW2DT-macOS-ARM.tar.gz
+            CW2DT-Linux.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
