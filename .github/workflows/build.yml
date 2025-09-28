@@ -52,8 +52,7 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install -r Clone-Website-to-Docker-Tool/requirements.txt
-          pip install pyinstaller pillow
+          pip install pyinstaller pillow requests beautifulsoup4 lxml
 
       # Cross-platform icon generation
       - name: Generate Icons
