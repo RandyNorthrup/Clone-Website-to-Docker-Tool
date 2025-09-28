@@ -55,9 +55,9 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6
           fi
+          # Always install these explicitly to avoid "command not found"
+          pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6
 
       - name: Ensure project directories
         shell: bash
@@ -71,7 +71,7 @@ jobs:
           # -*- mode: python ; coding: utf-8 -*-
           import os
           from PyInstaller.utils.hooks import collect_submodules
-          
+
           def existing(path): 
               return path if os.path.exists(path) else None
 
