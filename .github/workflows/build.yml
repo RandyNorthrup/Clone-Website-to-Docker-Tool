@@ -17,19 +17,17 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          cd Clone-Website-to-Docker-Tool
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
       - name: Build with PyInstaller
         run: |
-          cd Clone-Website-to-Docker-Tool
           pyinstaller --onefile --windowed --icon icon.ico cw2dt.py
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cw2dt-windows
-          path: Clone-Website-to-Docker-Tool/dist/cw2dt.exe
+          path: dist/cw2dt.exe
 
   build-macos:
     runs-on: macos-latest
@@ -41,19 +39,17 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          cd Clone-Website-to-Docker-Tool
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
       - name: Build with PyInstaller
         run: |
-          cd Clone-Website-to-Docker-Tool
           pyinstaller --onedir --windowed --icon icon.icns cw2dt.py
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cw2dt-macos
-          path: Clone-Website-to-Docker-Tool/dist/cw2dt.app
+          path: dist/cw2dt.app
 
   build-linux:
     runs-on: ubuntu-latest
@@ -65,19 +61,17 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          cd Clone-Website-to-Docker-Tool
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
       - name: Build with PyInstaller
         run: |
-          cd Clone-Website-to-Docker-Tool
           pyinstaller --onefile --windowed cw2dt.py
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cw2dt-linux
-          path: Clone-Website-to-Docker-Tool/dist/cw2dt
+          path: dist/cw2dt
 
   release:
     needs: [build-windows, build-macos, build-linux]
