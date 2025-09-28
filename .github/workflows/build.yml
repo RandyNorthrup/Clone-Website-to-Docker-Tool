@@ -56,9 +56,7 @@ jobs:
 
 
       - name: Build Executable
-        run: |
-          pyinstaller Clone-Website-to-Docker-Tool/cw2dt.spec \
-            --icon=Clone-Website-to-Docker-Tool/icon.ico
+        run: pyinstaller Clone-Website-to-Docker-Tool/cw2dt.spec
 
       - name: Package Executable (Windows)
         if: matrix.platform == 'Windows'
