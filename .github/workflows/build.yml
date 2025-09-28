@@ -79,9 +79,7 @@ jobs:
           python make_icons.py
 
       - name: Build Executable
-        run: |
-          cd Clone-Website-to-Docker-Tool
-          pyinstaller cw2dt.spec
+        run: pyinstaller cw2dt.spec
 
       - name: Package Executable (Windows)
         if: matrix.platform == 'Windows'
