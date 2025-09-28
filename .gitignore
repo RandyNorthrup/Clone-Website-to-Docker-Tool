@@ -32,4 +32,3 @@ ENV/
 # PyInstaller build artifacts
 build/
 dist/
-*.spec
