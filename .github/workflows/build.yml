@@ -3,7 +3,7 @@ name: Build and Release Clone Website to Docker Tool
 on:
   push:
     tags:
-      - '*' # Trigger on any tag push
+      - '*'
   workflow_dispatch:
 
 jobs:
@@ -78,3 +78,31 @@ jobs:
         with:
           name: cw2dt-linux
           path: Clone-Website-to-Docker-Tool/dist/cw2dt
+
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cw2dt-windows
+          path: dist/
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cw2dt-macos
+          path: dist/
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cw2dt-linux
+          path: dist/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/cw2dt-windows/cw2dt.exe
+            dist/cw2dt-macos/cw2dt.app
+            dist/cw2dt-linux/cw2dt
