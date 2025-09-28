@@ -62,6 +62,14 @@ jobs:
         shell: bash
         run: mkdir -p images
 
+      - name: Set Version from Tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Set Default Version if No Tag
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: echo "VERSION=dev-build" >> $GITHUB_ENV
+
       - name: Write PyInstaller spec
         shell: bash
         run: |
@@ -137,6 +145,7 @@ jobs:
               codesign_identity=None,
               entitlements_file=None,
               icon=icon_path,
+              onefile=True,  # Single-binary mode
           )
           PYZSPEC
 
@@ -144,19 +153,19 @@ jobs:
         shell: bash
         run: pyinstaller --noconfirm cw2dt.spec
 
-      # Windows packaging now uses Compress-Archive
+      # Windows packaging uses Compress-Archive
       - name: Package Windows
         if: matrix.platform == 'Windows'
         shell: pwsh
         run: |
-          Write-Output "Contents of dist/ directory before packaging:"
-          Get-ChildItem dist
+          $zipName = "CW2DT-Windows-${env:VERSION}.zip"
           if (Test-Path "dist/cw2dt.exe") {
             if (Test-Path "icon.ico") {
-              Compress-Archive -Path "dist/cw2dt.exe","icon.ico" -DestinationPath "CW2DT-Windows.zip" -Force
+              Compress-Archive -Path "dist/cw2dt.exe","icon.ico" -DestinationPath $zipName -Force
             } else {
-              Compress-Archive -Path "dist/cw2dt.exe" -DestinationPath "CW2DT-Windows.zip" -Force
+              Compress-Archive -Path "dist/cw2dt.exe" -DestinationPath $zipName -Force
             }
+            Get-FileHash $zipName -Algorithm SHA256 | ForEach-Object { "\${_.Hash} *$zipName" } | Out-File "$zipName.sha256"
           } else {
             Write-Error "Windows executable not found in dist/"
             exit 1
@@ -167,9 +176,11 @@ jobs:
         shell: bash
         run: |
           cd dist
+          zipName=../CW2DT-Linux-${VERSION}.zip
           if [ -f cw2dt ]; then
             chmod +x cw2dt
-            zip -j ../CW2DT-Linux.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
+            zip -j $zipName cw2dt ../icon.icns 2>/dev/null || zip -j $zipName cw2dt
+            sha256sum $zipName > $zipName.sha256
           else
             echo "ERROR: Linux binary not found!"
             exit 1
@@ -180,20 +191,24 @@ jobs:
         shell: bash
         run: |
           cd dist
+          zipName=../CW2DT-${{ matrix.platform }}-${VERSION}.zip
           if [ -d cw2dt.app ]; then
-            ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../CW2DT-${{ matrix.platform }}.zip
+            ditto -c -k --sequesterRsrc --keepParent cw2dt.app $zipName
           elif [ -f cw2dt ]; then
-            zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt
+            zip -j $zipName cw2dt ../icon.icns 2>/dev/null || zip -j $zipName cw2dt
           else
             echo "ERROR: macOS app or binary not found!"
             exit 1
           fi
+          shasum -a 256 $zipName > $zipName.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CW2DT-${{ matrix.platform }}
-          path: CW2DT-${{ matrix.platform }}.zip
+          path: |
+            CW2DT-${{ matrix.platform }}-${{ env.VERSION }}.zip
+            CW2DT-${{ matrix.platform }}-${{ env.VERSION }}.zip.sha256
           if-no-files-found: error
 
   release:
@@ -210,7 +225,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            CW2DT-Windows.zip
-            CW2DT-macOS-Intel.zip
-            CW2DT-macOS-ARM.zip
-            CW2DT-Linux.zip
+            CW2DT-Windows-${{ env.VERSION }}.zip
+            CW2DT-Windows-${{ env.VERSION }}.zip.sha256
+            CW2DT-macOS-Intel-${{ env.VERSION }}.zip
+            CW2DT-macOS-Intel-${{ env.VERSION }}.zip.sha256
+            CW2DT-macOS-ARM-${{ env.VERSION }}.zip
+            CW2DT-macOS-ARM-${{ env.VERSION }}.zip.sha256
+            CW2DT-Linux-${{ env.VERSION }}.zip
+            CW2DT-Linux-${{ env.VERSION }}.zip.sha256
