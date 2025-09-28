@@ -1,5 +1,8 @@
 name: Build and Release Clone Website to Docker Tool
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -97,6 +100,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/cw2dt-windows/cw2dt.exe
-            dist/cw2dt-macos/cw2dt.app
-            dist/cw2dt-linux/cw2dt
+            dist/cw2dt.exe
+            dist/cw2dt.app
+            dist/cw2dt
