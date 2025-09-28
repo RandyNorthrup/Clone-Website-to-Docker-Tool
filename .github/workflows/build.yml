@@ -73,6 +73,7 @@ jobs:
           def existing(path): 
               return path if os.path.exists(path) else None
 
+          # Data files
           image_files = []
           for fn in [
               "Clone-Website-to-Docker-Tool/images/arrow_right.png",
@@ -86,7 +87,6 @@ jobs:
           datas = []
           if existing("Clone-Website-to-Docker-Tool/VERSION.txt"):
               datas.append(("Clone-Website-to-Docker-Tool/VERSION.txt", "."))
-
           datas += image_files
 
           hidden = (
@@ -94,6 +94,13 @@ jobs:
               collect_submodules("PySide6.QtGui") +
               collect_submodules("PySide6.QtWidgets")
           )
+
+          # Icon path: check repo root, fallback to None if missing
+          icon_path = None
+          if os.name == "nt" and os.path.exists("icon.ico"):
+              icon_path = "icon.ico"
+          elif os.name != "nt" and os.path.exists("icon.icns"):
+              icon_path = "icon.icns"
 
           a = Analysis(
               ["cw2dt.py"],
@@ -120,7 +127,7 @@ jobs:
               debug=False,
               bootloader_ignore_signals=False,
               strip=False,
-              upx=False,  # Disabled for Windows stability
+              upx=False,
               upx_exclude=[],
               runtime_tmpdir=None,
               console=False,
@@ -129,7 +136,7 @@ jobs:
               target_arch=None,
               codesign_identity=None,
               entitlements_file=None,
-              icon=("Clone-Website-to-Docker-Tool/icon.ico" if os.name == "nt" else ("Clone-Website-to-Docker-Tool/icon.icns" if os.path.exists("Clone-Website-to-Docker-Tool/icon.icns") else None)),
+              icon=icon_path,
           )
           PYZSPEC
 
@@ -146,7 +153,7 @@ jobs:
           echo "Contents of dist/ directory before packaging:"
           ls -al
           if [ -f cw2dt.exe ]; then
-            zip -j ../CW2DT-Windows.zip cw2dt.exe ../Clone-Website-to-Docker-Tool/icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
+            zip -j ../CW2DT-Windows.zip cw2dt.exe ../icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
           else
             echo "ERROR: Windows executable not found in dist/ after build!"
             exit 1
@@ -159,7 +166,7 @@ jobs:
           cd dist
           if [ -f cw2dt ]; then
             chmod +x cw2dt
-            zip -j ../CW2DT-Linux.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
+            zip -j ../CW2DT-Linux.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
           else
             echo "ERROR: Linux binary not found!"
             exit 1
@@ -173,7 +180,7 @@ jobs:
           if [ -d cw2dt.app ]; then
             ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../CW2DT-${{ matrix.platform }}.zip
           elif [ -f cw2dt ]; then
-            zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt
+            zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt
           else
             echo "ERROR: macOS app or binary not found!"
             exit 1
