@@ -120,7 +120,7 @@ jobs:
               debug=False,
               bootloader_ignore_signals=False,
               strip=False,
-              upx=True,
+              upx=False,  # Disabled for Windows stability
               upx_exclude=[],
               runtime_tmpdir=None,
               console=False,
@@ -137,16 +137,18 @@ jobs:
         shell: bash
         run: pyinstaller --noconfirm cw2dt.spec
 
-      # Packaging steps with fallback handling
+      # Packaging steps with fallback + debugging
       - name: Package Windows
         if: matrix.platform == 'Windows'
         shell: bash
         run: |
           cd dist
+          echo "Contents of dist/ directory before packaging:"
+          ls -al
           if [ -f cw2dt.exe ]; then
             zip -j ../CW2DT-Windows.zip cw2dt.exe ../Clone-Website-to-Docker-Tool/icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
           else
-            echo "Windows executable not found!"
+            echo "ERROR: Windows executable not found in dist/ after build!"
             exit 1
           fi
 
@@ -159,7 +161,7 @@ jobs:
             chmod +x cw2dt
             zip -j ../CW2DT-Linux.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
           else
-            echo "Linux binary not found!"
+            echo "ERROR: Linux binary not found!"
             exit 1
           fi
 
@@ -173,7 +175,7 @@ jobs:
           elif [ -f cw2dt ]; then
             zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt
           else
-            echo "macOS app or binary not found!"
+            echo "ERROR: macOS app or binary not found!"
             exit 1
           fi
 
