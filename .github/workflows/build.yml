@@ -54,6 +54,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow requests beautifulsoup4 lxml
 
+      - name: Ensure Clone-Website-to-Docker-Tool directory exists
+        run: mkdir -p Clone-Website-to-Docker-Tool/images
+
       - name: Generate PyInstaller spec file
         run: |
           echo "# -*- mode: python ; coding: utf-8 -*-" > Clone-Website-to-Docker-Tool/cw2dt.spec
@@ -71,7 +74,7 @@ jobs:
           echo "    ['cw2dt.py']," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    pathex=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    binaries=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    datas=[('version.txt', '.')] + image_files," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    datas=[('VERSION.txt', '.')] + image_files," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    hiddenimports=['PySide6']," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    hookspath=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    hooksconfig={}," >> Clone-Website-to-Docker-Tool/cw2dt.spec
@@ -89,7 +92,7 @@ jobs:
           echo "    a.datas," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    []," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    name='Clone Website to Docker Tool'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
-          echo "    version='version.txt'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    version='VERSION.txt'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    debug=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    bootloader_ignore_signals=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
           echo "    strip=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
