@@ -56,7 +56,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Always install these explicitly to avoid "command not found"
           pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6
 
       - name: Ensure project directories
@@ -65,7 +64,6 @@ jobs:
 
       - name: Write PyInstaller spec
         shell: bash
-        working-directory: Clone-Website-to-Docker-Tool
         run: |
           cat > cw2dt.spec << 'PYZSPEC'
           # -*- mode: python ; coding: utf-8 -*-
@@ -76,20 +74,25 @@ jobs:
               return path if os.path.exists(path) else None
 
           image_files = []
-          for fn in ["images/arrow_right.png","images/docker_logo.png","images/icon.png","images/web_logo.png"]:
+          for fn in [
+              "Clone-Website-to-Docker-Tool/images/arrow_right.png",
+              "Clone-Website-to-Docker-Tool/images/docker_logo.png",
+              "Clone-Website-to-Docker-Tool/images/icon.png",
+              "Clone-Website-to-Docker-Tool/images/web_logo.png"
+          ]:
               if os.path.exists(fn):
                   image_files.append((fn, "images"))
 
           datas = []
-          if existing("VERSION.txt"):
-              datas.append(("VERSION.txt", "."))
+          if existing("Clone-Website-to-Docker-Tool/VERSION.txt"):
+              datas.append(("Clone-Website-to-Docker-Tool/VERSION.txt", "."))
 
           datas += image_files
 
-          hidden = ["PySide6"] + collect_submodules("PySide6")
+          hidden = collect_submodules("PySide6.QtCore") + collect_submodules("PySide6.QtGui") + collect_submodules("PySide6.QtWidgets")
 
           a = Analysis(
-              ["cw2dt.py"],
+              ["Clone-Website-to-Docker-Tool/cw2dt.py"],
               pathex=[],
               binaries=[],
               datas=datas,
@@ -122,36 +125,35 @@ jobs:
               target_arch=None,
               codesign_identity=None,
               entitlements_file=None,
-              icon=("icon.ico" if os.name == "nt" else ("icon.icns" if os.path.exists("icon.icns") else None)),
+              icon=("Clone-Website-to-Docker-Tool/icon.ico" if os.name == "nt" else ("Clone-Website-to-Docker-Tool/icon.icns" if os.path.exists("Clone-Website-to-Docker-Tool/icon.icns") else None)),
           )
           PYZSPEC
 
       - name: Build executable/bundle
         shell: bash
-        working-directory: Clone-Website-to-Docker-Tool
         run: pyinstaller --noconfirm cw2dt.spec
 
       - name: Package Windows
         if: matrix.platform == 'Windows'
         shell: bash
         run: |
-          cd Clone-Website-to-Docker-Tool/dist
-          zip -j ../../CW2DT-Windows.zip cw2dt.exe ../icon.ico 2>/dev/null || zip -j ../../CW2DT-Windows.zip cw2dt.exe
+          cd dist
+          zip -j ../CW2DT-Windows.zip cw2dt.exe ../Clone-Website-to-Docker-Tool/icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
 
       - name: Package Linux
         if: matrix.platform == 'Linux'
         shell: bash
         run: |
-          cd Clone-Website-to-Docker-Tool/dist
+          cd dist
           chmod +x cw2dt || true
-          zip -j ../../CW2DT-Linux.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../../CW2DT-Linux.zip cw2dt
+          zip -j ../CW2DT-Linux.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
 
       - name: Package macOS
         if: startsWith(matrix.platform, 'macOS')
         shell: bash
         run: |
-          cd Clone-Website-to-Docker-Tool/dist
-          ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../../CW2DT-${{ matrix.platform }}.zip
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../CW2DT-${{ matrix.platform }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
