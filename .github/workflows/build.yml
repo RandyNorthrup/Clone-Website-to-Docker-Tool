@@ -54,6 +54,58 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow requests beautifulsoup4 lxml
 
+      - name: Generate PyInstaller spec file
+        run: |
+          echo "# -*- mode: python ; coding: utf-8 -*-" > Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "import os" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "image_files = [" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    ('images/arrow_right.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    ('images/docker_logo.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    ('images/icon.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    ('images/web_logo.png', 'images')," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "]" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "a = Analysis(" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    ['cw2dt.py']," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    pathex=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    binaries=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    datas=[('version.txt', '.')] + image_files," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    hiddenimports=['PySide6']," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    hookspath=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    hooksconfig={}," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    runtime_hooks=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    excludes=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    noarchive=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    optimize=0," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo ")" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "pyz = PYZ(a.pure)" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "exe = EXE(" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    pyz," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    a.scripts," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    a.binaries," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    a.datas," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    []," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    name='Clone Website to Docker Tool'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    version='version.txt'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    debug=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    bootloader_ignore_signals=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    strip=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    upx=True," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    upx_exclude=[]," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    runtime_tmpdir=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    console=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    disable_windowed_traceback=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    argv_emulation=False," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    target_arch=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    codesign_identity=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    entitlements_file=None," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo "    icon='icon.ico' if os.name == 'nt' else 'icon.icns'," >> Clone-Website-to-Docker-Tool/cw2dt.spec
+          echo ")" >> Clone-Website-to-Docker-Tool/cw2dt.spec
+
+
 
       - name: Build Executable
         run: pyinstaller Clone-Website-to-Docker-Tool/cw2dt.spec
@@ -98,5 +150,4 @@ jobs:
             CW2DT-macOS-Intel.zip
             CW2DT-macOS-ARM.zip
             CW2DT-Linux.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
