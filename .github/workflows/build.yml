@@ -2,8 +2,8 @@ name: Build and Release Clone Website to Docker Tool
 
 on:
   push:
-    paths:
-      - 'Clone-Website-to-Docker-Tool/version.txt'
+    tags:
+      - '*' # Trigger on any tag push
   workflow_dispatch:
 
 jobs:
