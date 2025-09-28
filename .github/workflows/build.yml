@@ -51,49 +51,49 @@ jobs:
 
       - name: Install Python packages
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller pillow
+          cd Clone-Website-to-Docker-Tool && python -m pip install --upgrade pip
+          cd Clone-Website-to-Docker-Tool && pip install -r requirements.txt
+          cd Clone-Website-to-Docker-Tool && pip install pyinstaller pillow
 
       # Cross-platform icon generation
       - name: Generate Icons
         run: |
-          echo "from PIL import Image" > make_icons.py
-          echo "import os, sys" >> make_icons.py
-          echo "os.makedirs('images', exist_ok=True)" >> make_icons.py
-          echo "img_path = 'images/icon.png'" >> make_icons.py
-          echo "ico_path = 'icon.ico'" >> make_icons.py
-          echo "try:" >> make_icons.py
-          echo "    img = Image.open(img_path)" >> make_icons.py
-          echo "except:" >> make_icons.py
-          echo "    img = Image.new('RGBA', (512, 512), (0, 122, 204, 255))" >> make_icons.py
-          echo "img.save(ico_path, format='ICO', sizes=[(16,16),(32,32),(64,64),(128,128),(256,256),(512,512)])" >> make_icons.py
-          echo "if sys.platform == 'darwin':" >> make_icons.py
-          echo "    icns_path = 'icon.icns'" >> make_icons.py
-          echo "    iconset = 'images/iconset'" >> make_icons.py
-          echo "    os.makedirs(iconset, exist_ok=True)" >> make_icons.py
-          echo "    for size in [16,32,64,128,256,512,1024]:" >> make_icons.py
-          echo "        resized = img.resize((size, size))" >> make_icons.py
-          echo "        resized.save(f'{iconset}/icon_{size}x{size}.png')" >> make_icons.py
-          echo "    os.system(f'iconutil -c icns {iconset} -o {icns_path}')" >> make_icons.py
-          python make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "from PIL import Image" > make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "import os, sys" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "os.makedirs('images', exist_ok=True)" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "img_path = 'images/icon.png'" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "ico_path = 'icon.ico'" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "try:" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    img = Image.open(img_path)" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "except:" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    img = Image.new('RGBA', (512, 512), (0, 122, 204, 255))" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "img.save(ico_path, format='ICO', sizes=[(16,16),(32,32),(64,64),(128,128),(256,256),(512,512)])" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "if sys.platform == 'darwin':" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    icns_path = 'icon.icns'" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    iconset = 'images/iconset'" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    os.makedirs(iconset, exist_ok=True)" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    for size in [16,32,64,128,256,512,1024]:" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "        resized = img.resize((size, size))" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "        resized.save(f'{iconset}/icon_{size}x{size}.png')" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && echo "    os.system(f'iconutil -c icns {iconset} -o {icns_path}')" >> make_icons.py
+          cd Clone-Website-to-Docker-Tool && python make_icons.py
 
       - name: Build Executable
-        run: pyinstaller cw2dt.spec
+        run: cd Clone-Website-to-Docker-Tool && pyinstaller cw2dt.spec
 
       - name: Package Executable (Windows)
         if: matrix.platform == 'Windows'
-        run: tar -czvf CW2DT-Windows.tar.gz dist/cw2dt.exe
+        run: cd Clone-Website-to-Docker-Tool && zip -j CW2DT-Windows.zip dist/cw2dt.exe
 
       - name: Package Executable (Linux/macOS)
         if: matrix.platform != 'Windows'
-        run: tar -czvf CW2DT-${{ matrix.platform }}.tar.gz dist/cw2dt*
+        run: cd Clone-Website-to-Docker-Tool && zip -j CW2DT-${{ matrix.platform }}.zip dist/cw2dt*
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: CW2DT-${{ matrix.platform }}
-          path: CW2DT-${{ matrix.platform }}.tar.gz
+          path: Clone-Website-to-Docker-Tool/CW2DT-${{ matrix.platform }}.zip
 
   release:
     needs: build
@@ -117,9 +117,9 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            CW2DT-Windows.tar.gz
-            CW2DT-macOS-Intel.tar.gz
-            CW2DT-macOS-ARM.tar.gz
-            CW2DT-Linux.tar.gz
+            CW2DT-Windows.zip
+            CW2DT-macOS-Intel.zip
+            CW2DT-macOS-ARM.zip
+            CW2DT-Linux.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
