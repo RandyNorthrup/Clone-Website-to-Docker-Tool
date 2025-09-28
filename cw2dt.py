@@ -792,7 +792,7 @@ class DockerClonerGUI(QWidget):
 # ---------- main ----------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    icon_path = find_icon("docker_logo.png")
+    icon_path = find_icon("icon.png")
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
     window = DockerClonerGUI()

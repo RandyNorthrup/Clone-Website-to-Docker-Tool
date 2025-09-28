@@ -1,9 +1,10 @@
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.env
+.env
 .env/
 .venv/
 venv/
@@ -27,3 +28,8 @@ ENV/
 *.bak
 *.swp
 *.tmp
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
