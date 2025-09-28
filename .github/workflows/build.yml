@@ -14,6 +14,24 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Cache images and icons
+        uses: actions/cache@v4
+        with:
+          path: |
+            images/
+            icon.ico
+            icon.icns
+          key: ${{ runner.os }}-assets-${{ hashFiles('images/*') }}-${{ hashFiles('icon.ico') }}-${{ hashFiles('icon.icns') }}
+          restore-keys: |
+            ${{ runner.os }}-assets-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -36,6 +54,24 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Cache images and icons
+        uses: actions/cache@v4
+        with:
+          path: |
+            images/
+            icon.ico
+            icon.icns
+          key: ${{ runner.os }}-assets-${{ hashFiles('images/*') }}-${{ hashFiles('icon.ico') }}-${{ hashFiles('icon.icns') }}
+          restore-keys: |
+            ${{ runner.os }}-assets-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -58,6 +94,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Cache images and icons
+        uses: actions/cache@v4
+        with:
+          path: |
+            images/
+            icon.ico
+            icon.icns
+          key: ${{ runner.os }}-assets-${{ hashFiles('images/*') }}-${{ hashFiles('icon.ico') }}-${{ hashFiles('icon.icns') }}
+          restore-keys: |
+            ${{ runner.os }}-assets-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
