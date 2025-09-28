@@ -56,7 +56,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Always install these explicitly so PyInstaller is guaranteed to exist
           pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6
 
       - name: Ensure project directories
@@ -97,7 +96,7 @@ jobs:
           )
 
           a = Analysis(
-              ["cw2dt.py"],  # fixed: correct path
+              ["cw2dt.py"],
               pathex=[],
               binaries=[],
               datas=datas,
@@ -138,27 +137,45 @@ jobs:
         shell: bash
         run: pyinstaller --noconfirm cw2dt.spec
 
+      # Packaging steps with fallback handling
       - name: Package Windows
         if: matrix.platform == 'Windows'
         shell: bash
         run: |
           cd dist
-          zip -j ../CW2DT-Windows.zip cw2dt.exe ../Clone-Website-to-Docker-Tool/icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
+          if [ -f cw2dt.exe ]; then
+            zip -j ../CW2DT-Windows.zip cw2dt.exe ../Clone-Website-to-Docker-Tool/icon.ico 2>/dev/null || zip -j ../CW2DT-Windows.zip cw2dt.exe
+          else
+            echo "Windows executable not found!"
+            exit 1
+          fi
 
       - name: Package Linux
         if: matrix.platform == 'Linux'
         shell: bash
         run: |
           cd dist
-          chmod +x cw2dt || true
-          zip -j ../CW2DT-Linux.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
+          if [ -f cw2dt ]; then
+            chmod +x cw2dt
+            zip -j ../CW2DT-Linux.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-Linux.zip cw2dt
+          else
+            echo "Linux binary not found!"
+            exit 1
+          fi
 
       - name: Package macOS
         if: startsWith(matrix.platform, 'macOS')
         shell: bash
         run: |
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../CW2DT-${{ matrix.platform }}.zip
+          if [ -d cw2dt.app ]; then
+            ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../CW2DT-${{ matrix.platform }}.zip
+          elif [ -f cw2dt ]; then
+            zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt ../Clone-Website-to-Docker-Tool/icon.icns 2>/dev/null || zip -j ../CW2DT-${{ matrix.platform }}.zip cw2dt
+          else
+            echo "macOS app or binary not found!"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
