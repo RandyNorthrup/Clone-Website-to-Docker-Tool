@@ -20,20 +20,12 @@ jobs:
         include:
           - os: windows-latest
             platform: Windows
-            distpath: Clone-Website-to-Docker-Tool/dist
-            exec_glob: cw2dt.exe
           - os: macos-latest
             platform: macOS-ARM
-            distpath: Clone-Website-to-Docker-Tool/dist/cw2dt.app
-            exec_glob: cw2dt.app
           - os: macos-13
             platform: macOS-Intel
-            distpath: Clone-Website-to-Docker-Tool/dist/cw2dt.app
-            exec_glob: cw2dt.app
           - os: ubuntu-latest
             platform: Linux
-            distpath: Clone-Website-to-Docker-Tool/dist
-            exec_glob: cw2dt
 
     steps:
       - uses: actions/checkout@v4
@@ -52,30 +44,34 @@ jobs:
 
       - name: Install OS deps (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y libcairo2
 
       - name: Install Python packages
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          # If you have a requirements.txt, this will use it; otherwise fall back to explicit list.
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pyinstaller pillow requests beautifulsoup4 lxml PySide6
+          fi
 
       - name: Ensure project directories
-        run: |
-          mkdir -p Clone-Website-to-Docker-Tool/images
+        shell: bash
+        run: mkdir -p Clone-Website-to-Docker-Tool/images
 
       - name: Write PyInstaller spec
-        working-directory: Clone-Website-to-Docker-Tool
         shell: bash
+        working-directory: Clone-Website-to-Docker-Tool
         run: |
           cat > cw2dt.spec << 'PYZSPEC'
           # -*- mode: python ; coding: utf-8 -*-
           import os
           from PyInstaller.utils.hooks import collect_submodules
           
-          # Data files that actually exist will be included.
           def existing(path): 
               return path if os.path.exists(path) else None
 
@@ -107,7 +103,6 @@ jobs:
           )
           pyz = PYZ(a.pure)
 
-          # Consistent app/binary name everywhere
           exe = EXE(
               pyz,
               a.scripts,
@@ -132,36 +127,37 @@ jobs:
           PYZSPEC
 
       - name: Build executable/bundle
+        shell: bash
         working-directory: Clone-Website-to-Docker-Tool
         run: pyinstaller --noconfirm cw2dt.spec
 
-      # Package per-OS
-      - name: Package (Windows)
+      - name: Package Windows
         if: matrix.platform == 'Windows'
+        shell: bash
         run: |
           cd Clone-Website-to-Docker-Tool/dist
           zip -j ../../CW2DT-Windows.zip cw2dt.exe ../icon.ico 2>/dev/null || zip -j ../../CW2DT-Windows.zip cw2dt.exe
 
-      - name: Package (Linux)
+      - name: Package Linux
         if: matrix.platform == 'Linux'
+        shell: bash
         run: |
           cd Clone-Website-to-Docker-Tool/dist
           chmod +x cw2dt || true
           zip -j ../../CW2DT-Linux.zip cw2dt ../icon.icns 2>/dev/null || zip -j ../../CW2DT-Linux.zip cw2dt
 
-      - name: Package (macOS)
+      - name: Package macOS
         if: startsWith(matrix.platform, 'macOS')
+        shell: bash
         run: |
           cd Clone-Website-to-Docker-Tool/dist
-          # Zip the .app bundle recursively
           ditto -c -k --sequesterRsrc --keepParent cw2dt.app ../../CW2DT-${{ matrix.platform }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CW2DT-${{ matrix.platform }}
-          path: |
-            CW2DT-${{ matrix.platform }}.zip
+          path: CW2DT-${{ matrix.platform }}.zip
           if-no-files-found: error
 
   release:
@@ -169,7 +165,6 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      # Download all platform artifacts into the workspace root
       - uses: actions/download-artifact@v4
         with:
           pattern: CW2DT-*
