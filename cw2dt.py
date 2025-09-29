@@ -1345,6 +1345,7 @@ class DockerClonerGUI(QWidget):
 
         # Outer layout
         root = QVBoxLayout(self)
+        self.root_layout = root
         self._set_scaled_margins(root, 16, 16, 16, 16)
         root.setSpacing(int(14 * self.ui_scale))
 
@@ -1400,17 +1401,16 @@ class DockerClonerGUI(QWidget):
         except Exception:
             pass
         root.addWidget(self.panes)
+
+        # Set a firm minimum window width so panes never overlap
+        self._update_min_window_width()
         # Keep the left panel reasonable; do not force full content width
         try:
             self.scroll_area.setMinimumWidth(280)
         except Exception:
             pass
         # Ensure the window cannot be shrunk smaller than the sum of pane minimums
-        try:
-            handle = 8
-            self.setMinimumWidth(int(self.scroll_area.minimumWidth() + self.right_panel.minimumWidth() + handle + 24))
-        except Exception:
-            pass
+        self._update_min_window_width()
 
         # Icons (top of panel)
         icon_row = QHBoxLayout(); icon_row.setContentsMargins(0, 0, 0, 6); icon_row.setSpacing(10)
@@ -1682,7 +1682,41 @@ class DockerClonerGUI(QWidget):
         try:
             self.card.adjustSize()
             min_left = self.card.sizeHint().width() + int(24 * self.ui_scale)
-            self.scroll_area.setMinimumWidth(min_left)
+            # Cap the left pane minimum so the console retains space;
+            # overall window minimum prevents overlap.
+            capped = max(280, min_left)
+            self.scroll_area.setMinimumWidth(capped)
+        except Exception:
+            pass
+
+    def _update_min_window_width(self):
+        """Ensure the main window cannot be resized smaller than both pane minimums.
+        Keeps the console’s left edge pinned by preventing layout compression/overlap.
+        """
+        try:
+            left_min = int(self.scroll_area.minimumWidth()) if hasattr(self, 'scroll_area') else 0
+            right_min = int(self.right_panel.minimumWidth()) if hasattr(self, 'right_panel') else 0
+            divider_w = 0
+            try:
+                divider_w = int(getattr(self, 'fixed_divider', None).minimumWidth()) if hasattr(self, 'fixed_divider') and self.fixed_divider else 0
+            except Exception:
+                divider_w = 0
+            # Include outer layout margins
+            outer_lr = 0
+            try:
+                m = self.root_layout.contentsMargins()
+                outer_lr = int(m.left() + m.right())
+            except Exception:
+                outer_lr = 0
+            safety = int(12 * getattr(self, 'ui_scale', 1.0))
+            total_min = max(100, left_min + divider_w + right_min + outer_lr + safety)
+            self.setMinimumWidth(total_min)
+            # Also ensure the inner panes container honors the minimum sum
+            try:
+                if hasattr(self, 'panes') and self.panes is not None:
+                    self.panes.setMinimumWidth(left_min + divider_w + right_min)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1992,6 +2026,11 @@ class DockerClonerGUI(QWidget):
         min_w = min(w, max(480, content_w))
         min_h = min(h, max(420, int((avail.height()*0.5) if avail else 520)))
         self.setMinimumSize(min_w, min_h)
+        # Also enforce a hard minimum based on pane minimums to prevent overlap
+        try:
+            self._update_min_window_width()
+        except Exception:
+            pass
         if not getattr(self, "_geometry_restored", False):
             self.resize(w, h)
 
