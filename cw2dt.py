@@ -1,4 +1,5 @@
-import sys, os, subprocess, shutil, platform, socket, webbrowser, ipaddress, importlib
+import sys, os, subprocess, shutil, platform, socket, webbrowser, ipaddress, importlib, time
+from typing import Optional
 from datetime import datetime
 
 # Qt imports are deferred until after headless handling to allow running without PySide6 installed.
@@ -71,15 +72,15 @@ def get_install_cmd(program: str):
                     return ["sudo","apk","add","docker"]
         return None
     if os_name == "Windows":
-        # Best effort: try winget or choco; package IDs may vary per system.
+        # wget2 packages for Windows are not reliably available via winget/choco.
+        # Prefer opening docs instead of copying a likely-broken command.
+        if program == "wget2":
+            return None
+        # Docker Desktop is available via winget/choco.
         if shutil.which("winget"):
-            if program == "wget2":
-                return ["winget","install","-e","--id","GnuWin32.Wget2"]
             if program == "docker":
                 return ["winget","install","-e","--id","Docker.DockerDesktop"]
         if shutil.which("choco"):
-            if program == "wget2":
-                return ["choco","install","wget2","-y"]
             if program == "docker":
                 return ["choco","install","docker-desktop","-y"]
         return None
@@ -437,7 +438,7 @@ if __name__ == '__main__' and '--headless' in sys.argv:
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
     QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-    QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter
+    QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
 from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
@@ -528,6 +529,117 @@ class CollapsibleSection(QWidget):
 
     def is_expanded(self) -> bool:
         return not self._collapsed
+
+
+class GuardedSplitter(QSplitter):
+    """QSplitter that clamps the handle to respect each pane's minimum width.
+    Prevents a pane from sliding visually under its sibling when dragging.
+    """
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self._locked_pos = None  # type: int | None
+
+    def setLockedPosition(self, pos: int | None):
+        self._locked_pos = int(pos) if pos is not None else None
+        self.enforce_locked()
+
+    def enforce_locked(self):
+        if self._locked_pos is None:
+            return
+        try:
+            if self.orientation() != Qt.Orientation.Horizontal or self.count() < 2:
+                return
+            # Derive clamped position and apply sizes
+            try:
+                handle = int(self.handleWidth())
+            except Exception:
+                handle = 8
+            total = max(0, int(self.width()))
+            left_min = max(0, int(self.widget(0).minimumWidth()))
+            right_min = max(0, int(self.widget(1).minimumWidth()))
+            safe_gap_right = 8
+            min_pos = left_min
+            max_pos = max(min_pos, total - right_min - handle - safe_gap_right)
+            pos = max(min_pos, min(int(self._locked_pos), max_pos))
+            right = max(0, total - pos - handle)
+            if right < right_min:
+                right = right_min
+                pos = max(0, total - right - handle)
+            self.setSizes([pos, right])
+        except Exception:
+            pass
+
+    def moveSplitter(self, pos: int, index: int) -> None:
+        try:
+            if self.orientation() == Qt.Orientation.Horizontal and self.count() >= 2:
+                try:
+                    handle = int(self.handleWidth())
+                except Exception:
+                    handle = 8
+                total = max(0, int(self.width()))
+                left_min = max(0, int(self.widget(0).minimumWidth()))
+                right_min = max(0, int(self.widget(1).minimumWidth()))
+                # Add a small safety gap so child borders never touch the handle visually
+                safe_gap_left = 0
+                safe_gap_right = 8
+                min_pos = left_min + safe_gap_left
+                max_pos = max(min_pos, total - right_min - handle - safe_gap_right)
+                # Respect locked position if set
+                if self._locked_pos is not None:
+                    pos = self._locked_pos
+                pos = max(min_pos, min(int(pos), max_pos))
+        except Exception:
+            pass
+        super().moveSplitter(pos, index)
+
+    def createHandle(self) -> QSplitterHandle:
+        try:
+            return GuardedHandle(self.orientation(), self)
+        except Exception:
+            return super().createHandle()
+
+
+class GuardedHandle(QSplitterHandle):
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+
+    def mouseMoveEvent(self, event):
+        try:
+            sp: GuardedSplitter = self.splitter()  # type: ignore
+            if sp is not None:
+                if sp.orientation() == Qt.Orientation.Horizontal:
+                    if getattr(sp, '_locked_pos', None) is not None:
+                        # If locked, ignore dragging
+                        event.accept();
+                        return
+                    # Map handle-local pos to splitter coords
+                    x = self.mapTo(sp, event.pos()).x()
+                    sp.moveSplitter(x, self.index())
+                    event.accept()
+                    return
+        except Exception:
+            pass
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        try:
+            sp: GuardedSplitter = self.splitter()  # type: ignore
+            if sp is not None and getattr(sp, '_locked_pos', None) is not None:
+                event.accept();
+                return
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        try:
+            sp: GuardedSplitter = self.splitter()  # type: ignore
+            if sp is not None and getattr(sp, '_locked_pos', None) is not None:
+                event.accept();
+                return
+        except Exception:
+            pass
+        super().mouseReleaseEvent(event)
 
 # ---------- clone/build worker ----------
 class CloneThread(QThread):
@@ -957,7 +1069,11 @@ class CloneThread(QThread):
             return 0
         seen = set()
         try:
-            for line in proc.stdout:
+            stream = proc.stdout
+            if stream is None:
+                proc.wait()
+                return 0
+            for line in stream:
                 if not line:
                     continue
                 line = line.strip()
@@ -1035,7 +1151,7 @@ class CloneThread(QThread):
             emit_total_cb("build", 100)
         return True
 
-    def _cleanup_with_progress(self, output_folder: str, emit_total_cb, keep_rel_root: str = None):
+    def _cleanup_with_progress(self, output_folder: str, emit_total_cb, keep_rel_root: Optional[str] = None):
         """Delete build inputs with basic progress messages."""
         try:
             items = list(os.listdir(output_folder))
@@ -1180,11 +1296,13 @@ class InstallerThread(QThread):
             return
         lines = []
         try:
-            for line in proc.stdout:
-                if not line:
-                    continue
-                lines.append(line.rstrip())
-                self.progress.emit(line.rstrip())
+            stream = proc.stdout
+            if stream is not None:
+                for line in stream:
+                    if not line:
+                        continue
+                    lines.append(line.rstrip())
+                    self.progress.emit(line.rstrip())
             proc.wait()
         except Exception as e:
             self.progress.emit(f"Installer error: {e}")
@@ -1242,25 +1360,55 @@ class DockerClonerGUI(QWidget):
         card_layout.setSpacing(int(12 * self.ui_scale))
         # Wrap in a scroll area so smaller screens can still access all controls
         self.scroll_area = QScrollArea(); self.scroll_area.setWidget(self.card); self.scroll_area.setWidgetResizable(True)
+        try:
+            self.scroll_area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        except Exception:
+            pass
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         # Main split: left = scroll area (controls), right = console panel
         self.right_panel = QFrame(); self.right_panel.setObjectName("rightPanel")
+        try:
+            # Ensure it paints an opaque background (prevents visual overlap artifacts)
+            self.right_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        except Exception:
+            pass
+        # Prevent the console panel from collapsing past this width
         self.right_panel.setMinimumWidth(320)
         self.right_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.right_col = QVBoxLayout(self.right_panel); self.right_col.setContentsMargins(12,0,0,0); self.right_col.setSpacing(int(10 * self.ui_scale))
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.addWidget(self.scroll_area)
-        self.splitter.addWidget(self.right_panel)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 2)
-        root.addWidget(self.splitter)
-        # Ensure left side fits content: prevent squeezing below content width
+        # Use a fixed divider rather than a resizable splitter
+        self.panes = QFrame()
+        panes_layout = QHBoxLayout(self.panes)
+        panes_layout.setContentsMargins(0, 0, 0, 0)
+        panes_layout.setSpacing(0)
+        panes_layout.addWidget(self.scroll_area)
+        self.fixed_divider = QFrame(); self.fixed_divider.setObjectName("fixedDivider")
+        self.fixed_divider.setFrameShape(QFrame.Shape.NoFrame)
+        self.fixed_divider.setMinimumWidth(8); self.fixed_divider.setMaximumWidth(8)
         try:
-            min_left = self.card.sizeHint().width() + 24
-            self.scroll_area.setMinimumWidth(min_left)
+            self.fixed_divider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            self.fixed_divider.setStyleSheet("#fixedDivider { background: rgba(255,255,255,0.06); }")
+        except Exception:
+            pass
+        panes_layout.addWidget(self.fixed_divider)
+        panes_layout.addWidget(self.right_panel)
+        try:
+            panes_layout.setStretch(0, 2)
+            panes_layout.setStretch(2, 3)
+        except Exception:
+            pass
+        root.addWidget(self.panes)
+        # Keep the left panel reasonable; do not force full content width
+        try:
+            self.scroll_area.setMinimumWidth(280)
+        except Exception:
+            pass
+        # Ensure the window cannot be shrunk smaller than the sum of pane minimums
+        try:
+            handle = 8
+            self.setMinimumWidth(int(self.scroll_area.minimumWidth() + self.right_panel.minimumWidth() + handle + 24))
         except Exception:
             pass
 
@@ -1277,15 +1425,13 @@ class DockerClonerGUI(QWidget):
 
         # ---------- DEPENDENCIES ----------
         self.deps_frame = QFrame(); deps = QHBoxLayout(self.deps_frame); deps.setContentsMargins(0,0,0,0)
+        # Status-only labels (no action buttons here)
         self.dep_wget2_label = QLabel("")
-        self.install_wget2_btn = QPushButton("Copy wget2 install cmd"); self.install_wget2_btn.setObjectName("ghostBtn"); self.install_wget2_btn.clicked.connect(self.copy_wget2_install_cmd)
-        self.wget2_docs_btn = QPushButton("Open wget2 docs"); self.wget2_docs_btn.setObjectName("ghostBtn"); self.wget2_docs_btn.clicked.connect(self.open_wget2_docs)
         self.dep_docker_label = QLabel("")
-        self.install_docker_btn = QPushButton("Copy Docker install cmd"); self.install_docker_btn.setObjectName("ghostBtn"); self.install_docker_btn.clicked.connect(self.copy_docker_install_cmd)
-        self.docker_docs_btn = QPushButton("Open Docker docs"); self.docker_docs_btn.setObjectName("ghostBtn"); self.docker_docs_btn.clicked.connect(self.open_docker_docs)
-        deps.addWidget(self.dep_wget2_label); deps.addWidget(self.install_wget2_btn); deps.addWidget(self.wget2_docs_btn); deps.addSpacing(12)
-        deps.addWidget(self.dep_docker_label); deps.addWidget(self.install_docker_btn); deps.addWidget(self.docker_docs_btn); deps.addSpacing(12)
-        deps.addStretch(1)
+        self.dep_bc3_label = QLabel("")
+        deps.addWidget(self.dep_wget2_label); deps.addSpacing(12)
+        deps.addWidget(self.dep_docker_label); deps.addSpacing(12)
+        deps.addWidget(self.dep_bc3_label); deps.addStretch(1)
         card_layout.addWidget(self.deps_frame)
 
         # ---------- SOURCE ----------
@@ -1453,6 +1599,11 @@ class DockerClonerGUI(QWidget):
         self.stop_btn = QPushButton("Stop Container"); self.stop_btn.setObjectName("dangerBtn")
         self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self.stop_container)
         actions_row.addWidget(self.stop_btn)
+        # Show a single button to trigger the dependencies dialog (only when something is missing)
+        self.deps_dialog_btn = QPushButton("Fix Dependencies…"); self.deps_dialog_btn.setObjectName("ghostBtn")
+        self.deps_dialog_btn.setVisible(False)
+        self.deps_dialog_btn.clicked.connect(self.show_dependencies_dialog)
+        actions_row.addWidget(self.deps_dialog_btn)
         actions_row.addStretch(1)
 
         # URL tools
@@ -1471,7 +1622,13 @@ class DockerClonerGUI(QWidget):
         self.right_col.addWidget(t)
         self.resuming_label = QLabel("")
         self.resuming_label.setVisible(False); self.right_col.addWidget(self.resuming_label)
-        self.console = QTextEdit(); self.console.setReadOnly(True); self.console.setMinimumHeight(260)
+        self.console = QTextEdit(); self.console.setReadOnly(True); self.console.setMinimumHeight(260); self.console.setMinimumWidth(320)
+        try:
+            # Remove inner frame to avoid visual border conflicting with the splitter handle
+            self.console.setFrameShape(QFrame.Shape.NoFrame)
+            self.console.setLineWidth(0)
+        except Exception:
+            pass
         self.console.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.right_col.addWidget(self.console, 1)
 
@@ -1505,7 +1662,11 @@ class DockerClonerGUI(QWidget):
         self._geometry_restored = self._load_window_settings()
         self._finalize_sizing()
         self.refresh_deps_panel()
-        self.run_dependency_dialog_if_needed()
+        # After show, check deps and gate features without popups
+        try:
+            QTimer.singleShot(0, self.run_dependency_dialog_if_needed)
+        except Exception:
+            pass
         # Load recents after settings available
         self._load_recent_urls()
         # Ensure left pane minimum width fits all content horizontally
@@ -1547,14 +1708,16 @@ class DockerClonerGUI(QWidget):
         # Reapply stylesheet
         self.setStyleSheet(build_dark_css(self.ui_scale))
         # Update key layout paddings
-        root: QLayout = self.layout()
-        if root:
+        root = self.layout()
+        if root is not None:
             self._set_scaled_margins(root, 16, 16, 16, 16)
             root.setSpacing(int(14 * self.ui_scale))
         # Card layout margins
-        if hasattr(self, 'card') and self.card.layout():
-            self._set_scaled_margins(self.card.layout(), 18, 18, 18, 18)
-            self.card.layout().setSpacing(int(12 * self.ui_scale))
+        if hasattr(self, 'card'):
+            card_layout = self.card.layout()
+            if card_layout is not None:
+                self._set_scaled_margins(card_layout, 18, 18, 18, 18)
+                card_layout.setSpacing(int(12 * self.ui_scale))
         # Realign fixed width labels to new font metrics
         try:
             self._align_label_column()
@@ -1775,6 +1938,29 @@ class DockerClonerGUI(QWidget):
         if tip: self._set_status_text_elided(tip)
         super().resizeEvent(event)
 
+    def _enforce_splitter_minimums(self):
+        """Clamp splitter so neither side shrinks below its minimum width."""
+        try:
+            sizes = self.splitter.sizes()
+            if len(sizes) < 2:
+                return
+            left, right = sizes[0], sizes[1]
+            min_left = max(0, int(self.scroll_area.minimumWidth()))
+            min_right = max(0, int(self.right_panel.minimumWidth()))
+            total = max(1, left + right)
+            changed = False
+            if right < min_right:
+                right = min_right
+                left = max(0, total - right)
+                changed = True
+            if left < min_left:
+                left = min_left
+                right = max(0, total - left)
+                changed = True
+            if changed:
+                self.splitter.setSizes([left, right])
+        except Exception:
+            pass
     def _finalize_sizing(self):
         # Compute an initial reasonable size that fits content width (to avoid horizontal scroll)
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -1919,6 +2105,10 @@ class DockerClonerGUI(QWidget):
 
     # ----- actions -----
     def start_clone(self):
+        # Hard gate: cloning requires wget2 (Docker is optional for cloning)
+        if not is_wget2_available():
+            self.console.append("Required dependency missing: wget2. Click 'Fix Dependencies…' to copy an install command.")
+            return
         if self.container_id is not None:
             self.console.append("Stop the running container before creating a new one."); return
 
@@ -2205,99 +2395,181 @@ class DockerClonerGUI(QWidget):
     def refresh_deps_panel(self):
         has_wget2 = is_wget2_available()
         has_docker = docker_available()
-        self.deps_frame.setVisible(not (has_wget2 and has_docker))
+        try:
+            importlib.import_module('browser_cookie3'); has_bc3 = True
+        except Exception:
+            has_bc3 = False
+
+        # Show the dependency frame if anything is missing
+        any_missing = not (has_wget2 and has_docker and has_bc3)
+        self.deps_frame.setVisible(any_missing)
         self.dep_wget2_label.setText("wget2: Installed" if has_wget2 else "wget2: Missing")
         self.dep_docker_label.setText("Docker: Installed" if has_docker else "Docker: Missing")
-        self.install_wget2_btn.setEnabled(not has_wget2)
-        self.wget2_docs_btn.setEnabled(True)
-        self.install_docker_btn.setEnabled(not has_docker)
-        self.docker_docs_btn.setEnabled(True)
+        self.dep_bc3_label.setText("browser_cookie3: Installed" if has_bc3 else "browser_cookie3: Missing")
+        # Toggle visibility of the main-window dialog button
+        self.deps_dialog_btn.setVisible(any_missing)
+
+        # Apply feature gating: wget2 gates cloning; Docker gates build/run; bc3 only gates cookie scan
+        self._apply_dependency_gating(has_wget2, has_docker, has_bc3)
 
     def run_dependency_dialog_if_needed(self):
-        """Hard-gate required dependencies (wget2, browser_cookie3). Blocks UI until resolved or Quit."""
-        def deps_missing():
-            missing = []
-            if not is_wget2_available():
-                missing.append(('wget2', get_install_cmd('wget2')))
+        """Initial dependency check; updates banner and gating (no auto-install popups)."""
+        self.refresh_deps_panel()
+
+    def _apply_dependency_gating(self, has_wget2: bool, has_docker: bool, has_bc3: bool):
+        # Clone/source controls gated by wget2
+        for w in [self.url_input, self.save_path_display,
+                  self.size_cap_checkbox, self.size_cap_value, self.size_cap_unit,
+                  self.throttle_checkbox, self.throttle_value, self.throttle_unit,
+                  self.auth_checkbox, self.auth_user_input, self.auth_pass_input,
+                  self.estimate_checkbox, self.parallel_checkbox, self.parallel_jobs_input,
+                  self.disable_js_checkbox]:
             try:
-                importlib.import_module('browser_cookie3');
+                w.setEnabled(has_wget2)
             except Exception:
-                missing.append(('browser_cookie3', [sys.executable, '-m', 'pip', 'install', 'browser_cookie3']))
-            return missing
+                pass
 
-        self.set_controls_enabled(False)
-        while True:
-            missing = deps_missing()
-            if not missing:
-                self.set_controls_enabled(True)
-                self.refresh_deps_panel()
+        # Cookie scan only when bc3 present; cookie toggle follows clone gating
+        try:
+            self.scan_cookies_btn.setEnabled(has_wget2 and has_bc3)
+        except Exception:
+            pass
+        try:
+            self.use_cookies_checkbox.setEnabled(has_wget2 and bool(getattr(self, 'imported_cookies_file', None)))
+        except Exception:
+            pass
+
+        # Docker-related: build + run buttons gated by Docker
+        for w in [self.build_checkbox, self.docker_name_input,
+                  self.run_created_btn, self.run_folder_btn, self.stop_btn]:
+            try:
+                w.setEnabled(has_docker)
+            except Exception:
+                pass
+
+        # Keep run IP/ports editable even if Docker is missing
+        for w in [self.bind_ip_input, self.port_input, self.cport_input]:
+            try:
+                w.setEnabled(True)
+            except Exception:
+                pass
+
+        # Clone/resume buttons: clone needs wget2; resume just starts clone flow, so same
+        try:
+            if not has_wget2:
+                self.clone_btn.setEnabled(False)
+                self.resume_btn.setEnabled(False)
+        except Exception:
+            pass
+
+        # Keep the deps dialog button enabled regardless
+        try:
+            self.deps_dialog_btn.setEnabled(True)
+        except Exception:
+            pass
+
+        # Let normal run button logic refine state (running container, image present, etc.)
+        try:
+            self.refresh_run_buttons()
+        except Exception:
+            pass
+
+    def show_dependencies_dialog(self):
+        """Show a dialog listing missing dependencies with per-item copy install commands."""
+        dlg = QDialog(self); dlg.setWindowTitle('Missing Dependencies')
+        try:
+            dlg.setWindowModality(Qt.ApplicationModality.ApplicationModal)
+        except Exception:
+            pass
+        v = QVBoxLayout(dlg)
+        header = QLabel('Missing dependencies. Click Copy to copy an install command for your OS.')
+        v.addWidget(header)
+
+        # Dynamic list area
+        list_container = QVBoxLayout()
+        list_container.setContentsMargins(0,0,0,0)
+        v.addLayout(list_container)
+
+        def build_missing_list():
+            items = []
+            if not is_wget2_available():
+                cmd = get_install_cmd('wget2')
+                items.append(('wget2', (' '.join(cmd) if cmd else None), 'https://gitlab.com/gnuwget/wget2#installation'))
+            if not docker_available():
+                cmd = get_install_cmd('docker')
+                items.append(('Docker', (' '.join(cmd) if cmd else None), 'https://docs.docker.com/get-docker/'))
+            try:
+                importlib.import_module('browser_cookie3'); have_bc3 = True
+            except Exception:
+                have_bc3 = False
+            if not have_bc3:
+                items.append(('browser_cookie3 (optional)', f"{sys.executable} -m pip install browser_cookie3", None))
+            return items
+
+        def clear_layout(lo: QLayout):
+            try:
+                while lo.count():
+                    item = lo.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.setParent(None)
+                    sub = item.layout()
+                    if sub is not None:
+                        clear_layout(sub)
+            except Exception:
+                pass
+
+        def populate():
+            clear_layout(list_container)
+            items = build_missing_list()
+            if not items:
+                list_container.addWidget(QLabel('All dependencies are installed.'))
                 return
+            for name, cmd, docs in items:
+                row = QHBoxLayout(); row.setContentsMargins(0,0,0,0)
+                lbl = QLabel(f"{name}: Missing")
+                row.addWidget(lbl)
+                copy_btn = QPushButton('Copy install command')
+                def make_copy(c=cmd, n=name):
+                    def _():
+                        if c:
+                            QGuiApplication.clipboard().setText(c)
+                            self.console.append(f"Copied {n} install cmd: {c}")
+                        else:
+                            self.console.append(f"No automatic command for {n}. See docs.")
+                    return _
+                copy_btn.clicked.connect(make_copy())
+                row.addWidget(copy_btn)
+                if docs:
+                    docs_btn = QPushButton('Open docs')
+                    def make_docs(url=docs):
+                        def _():
+                            try:
+                                webbrowser.open(url)
+                            except Exception:
+                                pass
+                        return _
+                    docs_btn.clicked.connect(make_docs())
+                    row.addWidget(docs_btn)
+                row.addStretch(1)
+                list_container.addLayout(row)
 
-            dlg = QDialog(self); dlg.setWindowTitle('Installing Dependencies')
-            v = QVBoxLayout(dlg)
-            v.addWidget(QLabel('Installing required dependencies...'))
-            bar = QProgressBar(); bar.setRange(0, len(missing)); bar.setValue(0); v.addWidget(bar)
-            log = QTextEdit(); log.setReadOnly(True); log.setMinimumHeight(180); v.addWidget(log)
+        populate()
 
-            def append(text):
-                log.append(text); log.ensureCursorVisible()
+        btns = QHBoxLayout(); btns.addStretch(1)
+        recheck_btn = QPushButton('Recheck')
+        close_btn = QPushButton('Close')
+        btns.addWidget(recheck_btn)
+        btns.addWidget(close_btn)
+        v.addLayout(btns)
 
-            completed = 0
-            for name, cmd in missing:
-                append(f"Installing {name}...")
-                if not cmd:
-                    append(f"No automatic install command for {name}. Please install manually.")
-                    completed += 1; bar.setValue(completed)
-                    continue
-                th = InstallerThread(cmd)
-                th.progress.connect(append)
-                ok_holder = {'ok': False}
-                th.finished_ok.connect(lambda ok, h=ok_holder: h.__setitem__('ok', ok))
-                th.start()
-                # Wait
-                while th.isRunning():
-                    QGuiApplication.processEvents()
-                    QTimer.singleShot(50, lambda: None)
-                completed += 1
-                bar.setValue(completed)
-                append((f"{name} installed successfully.\n") if ok_holder['ok'] else (f"Failed to install {name}. You may need to install it manually.\n"))
-
-            # Done this pass
-            dlg.accept()
-
-            # Recheck
-            still_missing = deps_missing()
-            if not still_missing:
-                self.set_controls_enabled(True)
-                self.refresh_deps_panel()
-                return
-
-            # Offer options: Retry, Copy cmds, Open docs, Quit
-            box = QMessageBox(self)
-            box.setWindowTitle('Dependencies Missing')
-            msg = 'Some required dependencies could not be installed automatically. Choose an option.'
-            box.setText(msg)
-            copy_btn = box.addButton('Copy install cmds', QMessageBox.ButtonRole.ActionRole)
-            docs_btn = box.addButton('Open docs', QMessageBox.ButtonRole.ActionRole)
-            retry_btn = box.addButton('Retry', QMessageBox.ButtonRole.AcceptRole)
-            quit_btn = box.addButton('Quit', QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked == quit_btn:
-                QApplication.quit(); return
-            if clicked == copy_btn:
-                # Compose commands for all missing deps
-                cmds = []
-                for name, cmd in still_missing:
-                    if name == 'wget2':
-                        c = get_install_cmd('wget2'); cmds.append(' '.join(c) if c else 'See: https://gitlab.com/gnuwget/wget2#installation')
-                    elif name == 'browser_cookie3':
-                        cmds.append(f"{sys.executable} -m pip install browser_cookie3")
-                QGuiApplication.clipboard().setText('\n'.join(cmds))
-                self.console.append('Copied install commands to clipboard.')
-            elif clicked == docs_btn:
-                self.open_wget2_docs()
-            # else retry -> loop
+        def do_recheck():
+            # Refresh banner/gating and repopulate list in-place
+            self.refresh_deps_panel()
+            populate()
+        recheck_btn.clicked.connect(do_recheck)
+        close_btn.clicked.connect(dlg.accept)
+        dlg.exec()
 
     def copy_wget2_install_cmd(self):
         cmd = get_install_cmd("wget2")
@@ -2318,6 +2590,11 @@ class DockerClonerGUI(QWidget):
         text = " ".join(cmd)
         QGuiApplication.clipboard().setText(text)
         self.console.append(f"Copied Docker install cmd: {text}")
+
+    def copy_browser_cookie_install_cmd(self):
+        text = f"{sys.executable} -m pip install browser_cookie3"
+        QGuiApplication.clipboard().setText(text)
+        self.console.append("Copied browser_cookie3 install cmd: " + text)
 
     def open_wget2_docs(self):
         try:
@@ -2376,19 +2653,7 @@ if __name__ == "__main__":
         argv = [a for a in sys.argv[1:] if a != '--headless']
         code = headless_main(argv)
         sys.exit(code)
-    # GUI mode
-    try:
-        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    except Exception:
-        pass
-    try:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-    except Exception:
-        pass
-    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
-    os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
-
+    # GUI mode — rely entirely on Qt's defaults; no HiDPI overrides
     app = QApplication(sys.argv)
     icon_path = find_icon("icon.png")
     if icon_path:
