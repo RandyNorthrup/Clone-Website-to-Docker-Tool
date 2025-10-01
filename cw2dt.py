@@ -1,5 +1,6 @@
 import sys, os, subprocess, shutil, platform, socket, webbrowser, ipaddress, importlib, time
 from typing import Optional
+from dataclasses import dataclass
 from datetime import datetime
 
 # Qt imports are deferred until after headless handling to allow running without PySide6 installed.
@@ -13,6 +14,21 @@ DEFAULT_ROUTER_MAX_ROUTES = 200
 DEFAULT_ROUTER_SETTLE_MS = 350  # ms
 DEFAULT_CONTAINER_PORT = 80
 DEFAULT_HOST_PORT = 8080
+
+# ---- style constants (centralize repeated inline styles) ----
+VERIFY_BADGE_STYLE_OK = "color:#0a750a;font-weight:600;"
+VERIFY_BADGE_STYLE_FAIL = "color:#b00000;font-weight:600;"
+
+# ---- lightweight internal self-test samples ----
+_VERIFICATION_SAMPLE_OUTPUT = """Some lines\nOK=120 Missing=0 Mismatched=0 Total=120\nDone"""
+
+def _selftest_verification_parsing():  # dev aid, invoked via --selftest-verification
+    sample = _VERIFICATION_SAMPLE_OUTPUT
+    print("[selftest] sample input:\n" + sample)
+    stats = parse_verification_summary(sample)
+    print(f"[selftest] parsed: {stats}")
+    assert stats == {'ok':120,'missing':0,'mismatched':0,'total':120}, "parse_verification_summary failed selftest"
+    print("[selftest] SUCCESS")
 
  # (restored verification helpers header)
 
@@ -495,8 +511,16 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--verify-checksums', action='store_true', help='[Deprecated alias] Verify manifest checksums (fast mode)')
     parser.add_argument('--verify-after', action='store_true', help='Verify manifest after clone (fast unless --verify-deep)')
     parser.add_argument('--verify-deep', action='store_true', help='Deep verification (do not skip missing)')
+    parser.add_argument('--verify-fast', action='store_true', help='Alias of --verify-after (fast mode)')
+    parser.add_argument('--selftest-verification', action='store_true', help='Run internal verification parsing self-test and exit')
 
     args = parser.parse_args(argv)
+
+    if args.selftest_verification:
+        _selftest_verification_parsing(); return 0
+
+    if args.verify_fast:
+        args.verify_after = True
 
     if not is_wget2_available():
         print('Error: wget2 is required but not found. See https://gitlab.com/gnuwget/wget2#installation')
@@ -797,18 +821,26 @@ def _cli_estimate_with_spider(url: str) -> int:
     return len(seen)
 
 # If invoked headless, run before importing Qt
-if __name__ == '__main__' and '--headless' in sys.argv:
-    argv = [a for a in sys.argv[1:] if a != '--headless']
-    # Ensure mandatory Python dependency for headless: browser_cookie3
-    try:
-        importlib.import_module('browser_cookie3')
-    except Exception:
-        print('[deps] Installing browser_cookie3...')
-        rc = subprocess.call([sys.executable, '-m', 'pip', 'install', 'browser_cookie3'])
-        if rc != 0:
-            print('[error] Failed to install browser_cookie3. Please install it and retry.')
-            sys.exit(2)
-    sys.exit(headless_main(argv))
+if __name__ == '__main__':
+    # Standalone internal self-test bypasses all other logic
+    if '--selftest-verification' in sys.argv and '--headless' not in sys.argv:
+        _selftest_verification_parsing(); sys.exit(0)
+    if '--headless' in sys.argv:
+        argv = [a for a in sys.argv[1:] if a != '--headless']
+        # Allow selftest to skip dependency install to avoid network
+        if '--selftest-verification' in argv:
+            # still parse through headless_main (it short-circuits before heavy work)
+            sys.exit(headless_main(argv))
+        # Ensure mandatory Python dependency for headless: browser_cookie3
+        try:
+            importlib.import_module('browser_cookie3')
+        except Exception:
+            print('[deps] Installing browser_cookie3...')
+            rc = subprocess.call([sys.executable, '-m', 'pip', 'install', 'browser_cookie3'])
+            if rc != 0:
+                print('[error] Failed to install browser_cookie3. Please install it and retry.')
+                sys.exit(2)
+        sys.exit(headless_main(argv))
 
 # After headless early-exit, import Qt for GUI definitions below
 from PySide6.QtWidgets import (
@@ -2953,287 +2985,245 @@ class DockerClonerGUI(QWidget):
 
     # ----- actions -----
     def start_clone(self):
-        # Hard gate: cloning requires wget2 (Docker is optional for cloning)
-        if not is_wget2_available():
-            self.console.append("Required dependency missing: wget2. Click 'Fix Dependencies…' to copy an install command.")
+        # Snapshot inputs via helper for clarity
+        snapshot = self._snapshot_inputs()
+        if not snapshot:
             return
-        if self.container_id is not None:
-            self.console.append("Stop the running container before creating a new one."); return
-
-        try:
-            url = self.url_input.currentText().strip()
-        except Exception:
-            # fallback if widget type changes
-            url = str(getattr(self.url_input, 'text', lambda: '')()).strip()
-        docker_name = self.docker_name_input.text().strip()
-        save_path = self.save_path_display.text().strip()
-        self.current_port = self.port_input.value()  # host
-        self.current_container_port = self.cport_input.value()  # container
-        ip_text = normalize_ip(self.bind_ip_input.text())
-
-        if not url or not save_path:
-            self.console.append("Website URL and Destination Folder are required."); return
-        if not ip_text:
-            self.console.append("Invalid Bind IP. Use 127.0.0.1, 0.0.0.0, localhost, or a valid IPv4."); return
-
-        self.current_host_ip = ip_text
-
-        project_dir_name = docker_name if docker_name else "site"
-        self.last_project_dir = os.path.abspath(os.path.join(save_path, project_dir_name))
-        self.update_status(False, cid=None)
-
-        # Indicate resume if output dir already has content, and count files
-        try:
-            resume = os.path.isdir(self.last_project_dir) and any(True for _ in os.scandir(self.last_project_dir))
-        except Exception:
-            resume = False
-        pre_existing, pre_partial = (0, 0)
-        if resume:
-            pre_existing, pre_partial = count_files_and_partials(self.last_project_dir)
-            self.resuming_label.setText(f"Cloning (resuming) • Existing: {pre_existing} • Partial: {pre_partial}")
-            self.resuming_label.setVisible(True)
-            self.console.append(f"Existing files detected: {pre_existing} • partial: {pre_partial}")
-        else:
-            self.resuming_label.setVisible(False)
-
-        if port_in_use(self.current_host_ip, self.current_port):
-            self.console.append(f"Port {self.current_port} appears in use on {self.current_host_ip}.")
-            default = max(1, min(65535, self.current_port + 1))
-            port, ok = QInputDialog.getInt(self, "Port in Use", "Enter a different port:", default, 1, 65535)
-            if not ok: return
-            self.current_port = port
-            self.port_input.setValue(port)
-
-        size_cap = None
-        if self.size_cap_checkbox.isChecked():
-            mul = {"MB":1024**2,"GB":1024**3,"TB":1024**4}[self.size_cap_unit.currentText()]
-            size_cap = self.size_cap_value.value() * mul
-        throttle = None
-        if self.throttle_checkbox.isChecked():
-            mul = 1024 if self.throttle_unit.currentText()=="KB/s" else 1024**2
-            throttle = self.throttle_value.value() * mul
-
-        http_user = None; http_password = None
-        if self.auth_checkbox.isChecked():
-            http_user = self.auth_user_input.text().strip()
-            http_password = self.auth_pass_input.text()
-            if http_user and not http_password:
-                # allow empty password, but inform user
-                self.console.append("HTTP auth username provided; password is empty.")
-
-        # Advanced flags rely on individual control values regardless of collapse state
-        estimate_first = self.estimate_checkbox.isChecked()
-        parallel_jobs = self.parallel_jobs_input.value() if self.parallel_checkbox.isChecked() else 1
-        disable_js = self.disable_js_checkbox.isChecked()
-
-        if self.build_checkbox.isChecked() and not docker_name:
-            self.console.append("Docker image name is required when building an image."); return
-
         self.console.clear()
-        # Informational note about estimation and parallelism defaults/overrides
-        if estimate_first:
+        if snapshot.estimate_first:
             self.console.append("Estimation prepass: enabled")
         else:
             self.console.append("Estimation prepass: disabled")
-        src = "enabled" if self.parallel_checkbox.isChecked() else "disabled"
-        if parallel_jobs > 1:
-            self.console.append(f"Parallel downloads: enabled • jobs={parallel_jobs} ({src})")
+        if snapshot.parallel_jobs > 1:
+            self.console.append(f"Parallel downloads: enabled • jobs={snapshot.parallel_jobs}")
         else:
-            self.console.append(f"Parallel downloads: disabled ({src})")
-        # Prepare extra checksum extensions list (comma-separated input)
-        raw_extra_ext = []
-        if hasattr(self, 'checksum_extra_edit') and self.checksum_extra_edit.text().strip():
-            raw_extra_ext = [e.strip() for e in self.checksum_extra_edit.text().split(',') if e.strip()]
+            self.console.append("Parallel downloads: disabled")
+        if snapshot.http_user and not snapshot.http_password:
+            self.console.append("HTTP auth username provided; password empty.")
+        # Worker
         worker = CloneThread(
-            url, project_dir_name, save_path,
-            self.build_checkbox.isChecked(),
-            host_port=self.current_port, size_cap=size_cap, throttle=throttle,
-            host_ip=self.current_host_ip, container_port=self.current_container_port,
-            http_user=http_user, http_password=http_password,
-            pre_existing_count=pre_existing, pre_partial_count=pre_partial,
-            estimate_first=estimate_first, parallel_jobs=parallel_jobs,
-            disable_js=disable_js,
-            prerender=(self.prerender_checkbox.isChecked() if hasattr(self,'prerender_checkbox') and self.prerender_checkbox else False),
-            prerender_max_pages=(self.prerender_pages_spin.value() if hasattr(self,'prerender_pages_spin') and self.prerender_pages_spin else 40),
-            capture_api=(self.capture_api_checkbox.isChecked() if hasattr(self,'capture_api_checkbox') and self.capture_api_checkbox else False),
-            hook_script=(self.hook_script_path if hasattr(self,'hook_script_path') else None),
-            rewrite_urls=not (self.no_rewrite_checkbox.isChecked() if hasattr(self,'no_rewrite_checkbox') and self.no_rewrite_checkbox else False),
-            router_intercept=(self.router_intercept_checkbox.isChecked() if hasattr(self,'router_intercept_checkbox') and self.router_intercept_checkbox else False),
-            router_include_hash=(self.router_hash_checkbox.isChecked() if hasattr(self,'router_hash_checkbox') and self.router_hash_checkbox else False),
-            router_max_routes=(self.router_max_routes_spin.value() if hasattr(self,'router_max_routes_spin') and self.router_max_routes_spin else 200),
-            router_settle_ms=(self.router_settle_spin.value() if hasattr(self,'router_settle_spin') and self.router_settle_spin else 350),
-            router_wait_selector=(self.router_wait_selector_edit.text().strip() or None) if (hasattr(self,'router_wait_selector_edit') and self.router_wait_selector_edit) else None,
-            router_allow=([p.strip() for p in self.router_allow_edit.text().split(',') if p.strip()] if (hasattr(self,'router_allow_edit') and self.router_allow_edit.isEnabled() and self.router_allow_edit.text().strip()) else None),
-            router_deny=([p.strip() for p in self.router_deny_edit.text().split(',') if p.strip()] if (hasattr(self,'router_deny_edit') and self.router_deny_edit.isEnabled() and self.router_deny_edit.text().strip()) else None),
-            cookies_file=getattr(self, 'imported_cookies_file', None) if self.use_cookies_checkbox.isChecked() else None,
-            no_manifest=(self.skip_manifest_checkbox.isChecked() if hasattr(self,'skip_manifest_checkbox') and self.skip_manifest_checkbox else False),
-            checksums=(self.checksums_checkbox.isChecked() if hasattr(self,'checksums_checkbox') and self.checksums_checkbox else False),
-            checksum_extra_ext=raw_extra_ext or None
+            snapshot.url, snapshot.project_dir_name, snapshot.save_path,
+            snapshot.build_docker,
+            host_port=snapshot.host_port, size_cap=snapshot.size_cap, throttle=snapshot.throttle,
+            host_ip=snapshot.host_ip, container_port=snapshot.container_port,
+            http_user=snapshot.http_user, http_password=snapshot.http_password,
+            pre_existing_count=snapshot.pre_existing, pre_partial_count=snapshot.pre_partial,
+            estimate_first=snapshot.estimate_first, parallel_jobs=snapshot.parallel_jobs,
+            disable_js=snapshot.disable_js,
+            prerender=snapshot.prerender, prerender_max_pages=snapshot.prerender_max_pages,
+            capture_api=snapshot.capture_api, hook_script=snapshot.hook_script,
+            rewrite_urls=snapshot.rewrite_urls,
+            router_intercept=snapshot.router_intercept, router_include_hash=snapshot.router_include_hash,
+            router_max_routes=snapshot.router_max_routes, router_settle_ms=snapshot.router_settle_ms,
+            router_wait_selector=snapshot.router_wait_selector,
+            router_allow=snapshot.router_allow, router_deny=snapshot.router_deny,
+            cookies_file=snapshot.cookies_file,
+            no_manifest=snapshot.no_manifest,
+            checksums=snapshot.checksums,
+            checksum_extra_ext=snapshot.checksum_extra_ext
         )
-        verify_after = bool(hasattr(self, 'verify_checksums_checkbox') and self.verify_checksums_checkbox.isChecked())
-        if hasattr(self, 'router_quiet_checkbox') and self.router_quiet_checkbox.isEnabled():
-            worker.router_quiet = self.router_quiet_checkbox.isChecked()
+        if snapshot.router_quiet:
+            worker.router_quiet = True
         self.clone_thread = worker
         worker.progress.connect(self.update_console)
         worker.total_progress.connect(self.update_total_progress)
-        try:
-            worker.bandwidth.connect(self.update_bandwidth)
-        except Exception:
-            pass
-        try:
-            worker.api_capture.connect(self.update_api_capture)
-        except Exception:
-            pass
-        try:
-            worker.router_count.connect(self.update_router_count)
-        except Exception:
-            pass
+        worker.bandwidth.connect(self.update_bandwidth)
+        worker.api_capture.connect(self.update_api_capture)
+        worker.router_count.connect(self.update_router_count)
         worker.finished.connect(self.clone_finished)
-        if verify_after:
-            orig_clone_finished = self.clone_finished
-            def _finish_wrapper(log_text: str, docker_ok: bool, clone_ok: bool):
-                # first run original handler
-                orig_clone_finished(log_text, docker_ok, clone_ok)
-                # then schedule verification
-                def _run_verify():
-                    try:
-                        manifest_path = os.path.join(self.last_project_dir or '', 'clone_manifest.json')
-                        if not manifest_path or not os.path.exists(manifest_path):
-                            self.console.append("[verify] Manifest not found; skipping verification")
-                            return
-                        self.console.append("[verify] Running checksum verification…")
-                        import subprocess, sys as _sys, re, json as _json
-                        fast = True
-                        try:
-                            if hasattr(self, 'verify_fast_checkbox') and self.verify_fast_checkbox.isEnabled():
-                                fast = self.verify_fast_checkbox.isChecked()
-                        except Exception:
-                            fast = True
-                        cmd = [_sys.executable, os.path.join(os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path]
-                        if fast:
-                            cmd.append('--fast-missing')
-                        res = subprocess.run(cmd, capture_output=True, text=True)
-                        if res.stdout:
-                            for line in res.stdout.strip().splitlines():
-                                self.console.append(line)
-                        # Extract stats for badge/manifest
-                        ok = missing = mismatched = total = None
-                        try:
-                            import re as _re, json as _json
-                            summary_re = _re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
-                            for line in res.stdout.splitlines() if res.stdout else []:
-                                m = summary_re.search(line)
-                                if m:
-                                    ok, missing, mismatched, total = map(int, m.groups()); break
-                        except Exception:
-                            pass
-                        passed = (res.returncode == 0)
-                        # Badge
-                        try:
-                            if passed:
-                                self.verify_status_label.setText(f"VERIFY OK {ok}/{total if total is not None else ok}")
-                                self.verify_status_label.setStyleSheet("color:#0a750a;font-weight:600;")
-                            else:
-                                self.verify_status_label.setText("VERIFY FAIL")
-                                self.verify_status_label.setStyleSheet("color:#b00000;font-weight:600;")
-                            self.verify_status_label.setVisible(True)
-                        except Exception:
-                            pass
-                        # Manifest update
-                        try:
-                            with open(manifest_path,'r',encoding='utf-8') as _mf:
-                                _data=_json.load(_mf)
-                            _data['verification']={
-                                'status':'passed' if passed else 'failed',
-                                'ok':ok,'missing':missing,'mismatched':mismatched,'total':total,'fast_missing':fast
-                            }
-                            with open(manifest_path,'w',encoding='utf-8') as _mf:
-                                _json.dump(_data,_mf,indent=2)
-                        except Exception:
-                            pass
-                        # README append
-                        try:
-                            dn=(self.docker_name_input.text().strip() or 'site').strip()
-                            readme_path=os.path.join(self.last_project_dir or '',f"README_{dn}.md")
-                            if os.path.exists(readme_path):
-                                with open(readme_path,'a',encoding='utf-8') as rf:
-                                    rf.write("\n### Verification Result\n")
-                                    if passed:
-                                        rf.write(f"Passed ({ok}/{total} files)\n")
-                                    else:
-                                        rf.write(f"Failed (ok={ok} missing={missing} mismatched={mismatched} total={total})\n")
-                        except Exception:
-                            pass
-                        if passed:
-                            self.console.append("[verify] PASSED")
-                        else:
-                            self.console.append("[verify] FAILED (see above)")
-                        # Parse summary line for stats
-                        ok = missing = mismatched = total = None
-                        summary_re = re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
-                        for line in res.stdout.splitlines() if res.stdout else []:
-                            m = summary_re.search(line)
-                            if m:
-                                ok, missing, mismatched, total = map(int, m.groups()); break
-                        passed = (res.returncode == 0)
-                        # Update verification badge
-                        try:
-                            if passed:
-                                self.verify_status_label.setText(f"VERIFY OK {ok}/{total if total is not None else ok}")
-                                self.verify_status_label.setStyleSheet("color:#0a750a;font-weight:600;")
-                            else:
-                                self.verify_status_label.setText("VERIFY FAIL")
-                                self.verify_status_label.setStyleSheet("color:#b00000;font-weight:600;")
-                            self.verify_status_label.setVisible(True)
-                        except Exception:
-                            pass
-                        # Update manifest JSON
-                        try:
-                            with open(manifest_path,'r',encoding='utf-8') as mf:
-                                data=_json.load(mf)
-                            data['verification'] = {
-                                'status': 'passed' if passed else 'failed',
-                                'ok': ok, 'missing': missing, 'mismatched': mismatched, 'total': total,
-                                'fast_missing': fast
-                            }
-                            with open(manifest_path,'w',encoding='utf-8') as mf:
-                                _json.dump(data, mf, indent=2)
-                        except Exception:
-                            pass
-                        # Append README summary if present
-                        try:
-                            dn = (self.docker_name_input.text().strip() or 'site').strip()
-                            readme_path = os.path.join(self.last_project_dir or '', f"README_{dn}.md")
-                            if os.path.exists(readme_path):
-                                with open(readme_path,'a',encoding='utf-8') as rf:
-                                    rf.write("\n### Verification Result\n")
-                                    if passed:
-                                        rf.write(f"Passed ({ok}/{total} files)\n")
-                                    else:
-                                        rf.write(f"Failed (ok={ok} missing={missing} mismatched={mismatched} total={total})\n")
-                        except Exception:
-                            pass
-                        if passed:
-                            self.console.append("[verify] PASSED")
-                        else:
-                            self.console.append("[verify] FAILED (see above)")
-                    except Exception as e:
-                        self.console.append(f"[verify] Error: {e}")
-                QTimer.singleShot(0, _run_verify)
+        if snapshot.verify_after:
+            orig = self.clone_finished
+            def _wrap(log_text: str, docker_ok: bool, clone_ok: bool):
+                orig(log_text, docker_ok, clone_ok)
+                def do_verify():
+                    manifest_path = os.path.join(self.last_project_dir or '', 'clone_manifest.json')
+                    if not (manifest_path and os.path.exists(manifest_path)):
+                        self.console.append('[verify] Manifest not found; skipping')
+                        return
+                    self.console.append('[verify] Running checksum verification…')
+                    fast = snapshot.verify_fast
+                    passed, stats = run_verification(
+                        manifest_path,
+                        fast=fast,
+                        docker_name=snapshot.project_dir_name,
+                        project_dir=self.last_project_dir,
+                        output_cb=lambda line: self.console.append(line)
+                    )
+                    self._update_verification_badge(passed, stats)
+                    self.console.append('[verify] PASSED' if passed else '[verify] FAILED (see above)')
+                QTimer.singleShot(0, do_verify)
             try:
                 worker.finished.disconnect(self.clone_finished)
             except Exception:
                 pass
-            worker.finished.connect(_finish_wrapper)
-        # status bar will show progress during tasks
-        # Disable clone button during operation to prevent double-starts
+            worker.finished.connect(_wrap)
         self.clone_btn.setEnabled(False)
         self.cancel_clone_btn.setEnabled(True)
         self.last_clone_failed_or_canceled = False
-        # Remember URL in recents
-        if url:
-            self._remember_recent_url(url)
+        if snapshot.url:
+            self._remember_recent_url(snapshot.url)
         worker.start()
+
+    # --- configuration snapshot support ---
+    @dataclass
+    class _ConfigSnapshot:
+        url: str
+        project_dir_name: str
+        save_path: str
+        build_docker: bool
+        host_port: int
+        container_port: int
+        host_ip: str
+        size_cap: int | None
+        throttle: int | None
+        http_user: str | None
+        http_password: str | None
+        estimate_first: bool
+        parallel_jobs: int
+        disable_js: bool
+        prerender: bool
+        prerender_max_pages: int
+        capture_api: bool
+        hook_script: str | None
+        rewrite_urls: bool
+        router_intercept: bool
+        router_include_hash: bool
+        router_max_routes: int
+        router_settle_ms: int
+        router_wait_selector: str | None
+        router_allow: list[str] | None
+        router_deny: list[str] | None
+        cookies_file: str | None
+        no_manifest: bool
+        checksums: bool
+        checksum_extra_ext: list[str] | None
+        pre_existing: int
+        pre_partial: int
+        verify_after: bool
+        verify_fast: bool
+        router_quiet: bool
+
+    def _snapshot_inputs(self) -> Optional['_ConfigSnapshot']:
+        if not is_wget2_available():
+            self.console.append("Required dependency missing: wget2. Click 'Fix Dependencies…' to copy an install command.")
+            return None
+        if self.container_id is not None:
+            self.console.append("Stop the running container before creating a new one.")
+            return None
+        try:
+            url = self.url_input.currentText().strip()
+        except Exception:
+            url = str(getattr(self.url_input, 'text', lambda: '')()).strip()
+        docker_name = self.docker_name_input.text().strip()
+        save_path = self.save_path_display.text().strip()
+        host_port = self.port_input.value()
+        container_port = self.cport_input.value()
+        ip_text = normalize_ip(self.bind_ip_input.text())
+        if not url or not save_path:
+            self.console.append('Website URL and Destination Folder are required.')
+            return None
+        if not ip_text:
+            self.console.append('Invalid Bind IP.')
+            return None
+        if self.build_checkbox.isChecked() and not docker_name:
+            self.console.append('Docker image name is required when building an image.')
+            return None
+        self.current_host_ip = ip_text
+        self.current_port = host_port
+        self.current_container_port = container_port
+        project_dir_name = docker_name if docker_name else 'site'
+        self.last_project_dir = os.path.abspath(os.path.join(save_path, project_dir_name))
+        self.update_status(False, cid=None)
+        # resume detection
+        try:
+            resume = os.path.isdir(self.last_project_dir) and any(True for _ in os.scandir(self.last_project_dir))
+        except Exception:
+            resume = False
+        pre_existing = pre_partial = 0
+        if resume:
+            pre_existing, pre_partial = count_files_and_partials(self.last_project_dir)
+            self.resuming_label.setText(f'Cloning (resuming) • Existing: {pre_existing} • Partial: {pre_partial}')
+            self.resuming_label.setVisible(True)
+            self.console.append(f'Existing files detected: {pre_existing} • partial: {pre_partial}')
+        else:
+            self.resuming_label.setVisible(False)
+        if port_in_use(ip_text, host_port):
+            self.console.append(f'Port {host_port} appears in use on {ip_text}.')
+            default = max(1, min(65535, host_port + 1))
+            port, ok = QInputDialog.getInt(self, 'Port in Use', 'Enter a different port:', default, 1, 65535)
+            if not ok:
+                return None
+            host_port = port
+            self.port_input.setValue(port)
+            self.current_port = port
+        size_cap = None
+        if self.size_cap_checkbox.isChecked():
+            mul = {"MB":1024**2, "GB":1024**3, "TB":1024**4}[self.size_cap_unit.currentText()]
+            size_cap = self.size_cap_value.value() * mul
+        throttle = None
+        if self.throttle_checkbox.isChecked():
+            mul = 1024 if self.throttle_unit.currentText() == 'KB/s' else 1024**2
+            throttle = self.throttle_value.value() * mul
+        http_user = http_password = None
+        if self.auth_checkbox.isChecked():
+            http_user = self.auth_user_input.text().strip()
+            http_password = self.auth_pass_input.text()
+        estimate_first = self.estimate_checkbox.isChecked()
+        parallel_jobs = self.parallel_jobs_input.value() if self.parallel_checkbox.isChecked() else 1
+        disable_js = self.disable_js_checkbox.isChecked()
+        prerender = hasattr(self,'prerender_checkbox') and self.prerender_checkbox and self.prerender_checkbox.isChecked()
+        prerender_max_pages = self.prerender_pages_spin.value() if (hasattr(self,'prerender_pages_spin') and self.prerender_pages_spin) else DEFAULT_PRERENDER_MAX_PAGES
+        capture_api = hasattr(self,'capture_api_checkbox') and self.capture_api_checkbox and self.capture_api_checkbox.isChecked()
+        hook_script = getattr(self,'hook_script_path', None)
+        rewrite_urls = not (hasattr(self,'no_rewrite_checkbox') and self.no_rewrite_checkbox and self.no_rewrite_checkbox.isChecked())
+        router_intercept = hasattr(self,'router_intercept_checkbox') and self.router_intercept_checkbox.isChecked()
+        router_include_hash = hasattr(self,'router_hash_checkbox') and self.router_hash_checkbox.isChecked()
+        router_max_routes = self.router_max_routes_spin.value() if hasattr(self,'router_max_routes_spin') else DEFAULT_ROUTER_MAX_ROUTES
+        router_settle_ms = self.router_settle_spin.value() if hasattr(self,'router_settle_spin') else DEFAULT_ROUTER_SETTLE_MS
+        router_wait_selector = (self.router_wait_selector_edit.text().strip() or None) if hasattr(self,'router_wait_selector_edit') else None
+        router_allow = ([p.strip() for p in self.router_allow_edit.text().split(',') if p.strip()] if (hasattr(self,'router_allow_edit') and self.router_allow_edit.isEnabled() and self.router_allow_edit.text().strip()) else None)
+        router_deny = ([p.strip() for p in self.router_deny_edit.text().split(',') if p.strip()] if (hasattr(self,'router_deny_edit') and self.router_deny_edit.isEnabled() and self.router_deny_edit.text().strip()) else None)
+        cookies_file = getattr(self, 'imported_cookies_file', None) if (hasattr(self,'use_cookies_checkbox') and self.use_cookies_checkbox.isChecked()) else None
+        no_manifest = hasattr(self,'skip_manifest_checkbox') and self.skip_manifest_checkbox.isChecked()
+        checksums = hasattr(self,'checksums_checkbox') and self.checksums_checkbox.isChecked()
+        checksum_extra_ext = []
+        if hasattr(self,'checksum_extra_edit') and self.checksum_extra_edit.text().strip():
+            checksum_extra_ext = [e.strip() for e in self.checksum_extra_edit.text().split(',') if e.strip()]
+        verify_after = hasattr(self,'verify_checksums_checkbox') and self.verify_checksums_checkbox.isChecked()
+        verify_fast = True
+        if hasattr(self,'verify_fast_checkbox') and self.verify_fast_checkbox.isEnabled():
+            verify_fast = self.verify_fast_checkbox.isChecked()
+        router_quiet = hasattr(self,'router_quiet_checkbox') and self.router_quiet_checkbox.isEnabled() and self.router_quiet_checkbox.isChecked()
+        return self._ConfigSnapshot(
+            url=url, project_dir_name=project_dir_name, save_path=save_path,
+            build_docker=self.build_checkbox.isChecked(), host_port=host_port, container_port=container_port,
+            host_ip=ip_text, size_cap=size_cap, throttle=throttle, http_user=http_user, http_password=http_password,
+            estimate_first=estimate_first, parallel_jobs=parallel_jobs, disable_js=disable_js,
+            prerender=prerender, prerender_max_pages=prerender_max_pages, capture_api=capture_api, hook_script=hook_script,
+            rewrite_urls=rewrite_urls, router_intercept=router_intercept, router_include_hash=router_include_hash,
+            router_max_routes=router_max_routes, router_settle_ms=router_settle_ms, router_wait_selector=router_wait_selector,
+            router_allow=router_allow, router_deny=router_deny, cookies_file=cookies_file, no_manifest=no_manifest,
+            checksums=checksums, checksum_extra_ext=(checksum_extra_ext or None), pre_existing=pre_existing,
+            pre_partial=pre_partial, verify_after=verify_after, verify_fast=verify_fast, router_quiet=router_quiet
+        )
+
+    # --- verification badge helper ---
+    def _update_verification_badge(self, passed: bool, stats: dict):
+        try:
+            if not hasattr(self,'verify_status_label'):
+                return
+            if passed:
+                if stats.get('ok') is not None and stats.get('total') is not None:
+                    self.verify_status_label.setText(f"VERIFY OK {stats['ok']}/{stats['total']}")
+                else:
+                    self.verify_status_label.setText("VERIFY OK")
+                self.verify_status_label.setStyleSheet(VERIFY_BADGE_STYLE_OK)
+            else:
+                self.verify_status_label.setText("VERIFY FAIL")
+                self.verify_status_label.setStyleSheet(VERIFY_BADGE_STYLE_FAIL)
+            self.verify_status_label.setVisible(True)
+        except Exception:
+            pass
 
     def cancel_clone(self):
         if not (self.clone_thread and self.clone_thread.isRunning()):
