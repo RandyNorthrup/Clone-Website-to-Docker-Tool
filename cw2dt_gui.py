@@ -187,6 +187,8 @@ class DockerClonerGUI(QWidget):
         self._load_history()
         bar=QHBoxLayout(); bar.setSpacing(12); self.status_lbl=QLabel('Ready.'); self.metric_lbl=QLabel(''); self.phase_time_lbl=QLabel(''); bar.addWidget(self.status_lbl,1); bar.addWidget(self.metric_lbl,2); bar.addWidget(self.phase_time_lbl,2); root.addLayout(bar)
         self._compute_and_lock_min_size()
+        # Apply descriptive tooltips to all interactive widgets
+        self._apply_tooltips()
 
     # Helpers
     def _browse_dest(self):
@@ -201,6 +203,71 @@ class DockerClonerGUI(QWidget):
 
     def _connect_signals(self):
         self.sig_log.connect(self._on_log); self.sig_phase.connect(self._on_phase); self.sig_bandwidth.connect(lambda r: self._update_metric(rate=r)); self.sig_api.connect(lambda n: self._update_metric(api=n)); self.sig_router.connect(lambda n: self._update_metric(router=n)); self.sig_checksum.connect(lambda p: self._update_metric(chk=p))
+
+    def _apply_tooltips(self):  # Centralized tooltips for clarity & maintainability
+        tt={
+            'url_in':"Root website URL to clone (include scheme, e.g. https://example.com).",
+            'dest_in':"Local folder where the cloned site (and optionally Docker build context) will be written.",
+            'name_in':"Docker image/name tag to use when building/running the container.",
+            'ip_in':"Interface/IP to bind for serving or container port mapping (default 127.0.0.1).",
+            'host_port':"Host port exposed for Docker run / local serve.",
+            'cont_port':"Internal container port the app/site will listen on inside Docker (default 80).",
+            'chk_build':"Build a Docker image after cloning (produces a runnable container).",
+            'chk_run_built':"After successful build, immediately run the Docker container in detached mode.",
+            'chk_serve':"Serve the output folder with a lightweight HTTP server (no Docker).",
+            'chk_open_browser':"Open the default web browser after starting serve/run.",
+            'chk_incremental':"Enable wget incremental (-N): only download resources that are newer / changed since last run.",
+            'chk_diff':"After clone, compute diff vs previous state to produce change summary.",
+            'chk_estimate_first':"Before cloning, perform a quick spider to estimate total items (can refine decisions).",
+            'chk_cleanup':"Remove intermediate build artifacts (keeps output clean).",
+            'chk_prerender':"Use Playwright (headless Chromium) to render dynamic pages / SPAs before snapshotting (slower, more complete).",
+            'spin_prer_pages':"Maximum dynamic pages to prerender (caps exploration to avoid runaway crawling).",
+            'chk_capture_api':"Capture JSON / API responses encountered during prerender for offline reproduction.",
+            'hook_in':"Optional Python hook script executed for advanced customization (e.g. tweaking manifest).",
+            'chk_router':"Intercept client-side navigation (history/pushState) to enumerate additional SPA routes.",
+            'chk_route_hash':"Include hash fragment (#) as distinct route during interception.",
+            'chk_router_quiet':"Suppress per-route log spam while still counting routes.",
+            'spin_router_max':"Upper bound on total discovered routes (safety limit).",
+            'spin_router_settle':"Milliseconds to wait after navigation for network/DOM to stabilize before capture.",
+            'router_wait_sel':"CSS selector to wait for before considering a SPA route fully rendered (blank to skip).",
+            'router_allow':"Comma-separated regex patterns; only matching routes are kept (applied before deny).",
+            'router_deny':"Comma-separated regex patterns to exclude routes (evaluated after allow).",
+            'chk_checksums':"Compute file checksums (hashes) for integrity tracking.",
+            'chk_verify_after':"Immediately verify the generated site contents against recorded checksums.",
+            'chk_verify_deep':"Deep verification (may re-hash more aggressively / nested content).",
+            'checksum_ext':"Extra file extensions (comma separated) to include in checksum set (e.g. css,js,png).",
+            'chk_disable_js':"Strip <script> tags from output for hardened static snapshot (may break interactivity).",
+            'size_cap':"Total download size hard cap (e.g. 500M, 2G). Empty = unlimited.",
+            'throttle':"Limit download bandwidth (e.g. 2M for ~2 megabytes/second).",
+            'auth_user':"HTTP Basic Auth username (if site requires).",
+            'auth_pass':"HTTP Basic Auth password (if site requires).",
+            'cookies_file':"Path to Netscape format cookies.txt to inject during clone/prerender.",
+            'chk_import_browser_cookies':"Attempt to import cookies from installed browsers for the target domain.",
+            'plugins_dir':"Directory containing plugin Python files (loaded to extend pipeline phases).",
+            'btn_clone':"Start the cloning pipeline with current configuration.",
+            'btn_estimate':"Estimate approximate number of URLs/resources via lightweight spider.",
+            'btn_pause':"Pause / resume the active clone (cooperative between phases).",
+            'btn_cancel':"Request cooperative cancellation; current phase will attempt graceful stop.",
+            'btn_wizard':"Analyze the site heuristically and propose recommended dynamic / integrity options.",
+            'btn_run_docker':"Run the previously built Docker image (detached).",
+            'btn_serve':"Start/stop a simple HTTP server hosting the last successful output folder.",
+            'btn_deps':"Show installed / missing optional dependencies with install hints (commands copied to clipboard).",
+            'btn_save_cfg':"Save current settings as a reusable profile (stored in ~/.cw2dt_profiles).",
+            'btn_load_cfg':"Load a previously saved profile and apply its settings.",
+            'console':"Log output, progress messages, structured event summaries, and diagnostics.",
+        }
+        for name,text in tt.items():
+            w=getattr(self,name,None)
+            if w is not None:
+                try: w.setToolTip(text)
+                except Exception: pass
+        # Add composite clarifications
+        if hasattr(self,'status_lbl'):
+            self.status_lbl.setToolTip('High-level status and current weighted phase progress.')
+        if hasattr(self,'metric_lbl'):
+            self.metric_lbl.setToolTip('Inline live metrics: bandwidth, routes discovered, API captures, checksum progress, etc.')
+        if hasattr(self,'phase_time_lbl'):
+            self.phase_time_lbl.setToolTip('Elapsed time per completed phase (auto-updated).')
 
     def _update_dependency_banner(self):
         msgs=[]
