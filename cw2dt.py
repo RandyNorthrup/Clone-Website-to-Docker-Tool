@@ -1,3 +1,16 @@
+"""GUI + Headless tool for cloning websites into a Docker‑servable static snapshot.
+
+Provides:
+    * wget2-driven mirroring with optional pre-render (Playwright) & SPA route interception
+    * Checksum manifest generation and post-clone verification utilities
+    * Optional Docker image build + run helpers (nginx static server)
+    * Resume support with existing/partial file counting
+    * Live validation, recent destinations/URLs persistence, contextual help dialogs
+    * Headless CLI mode for automation / CI (omit PySide6 import path)
+
+All long-running work executes in a worker thread emitting granular progress
+signals which are merged into a single animated progress bar in the GUI.
+"""
 import sys, os, subprocess, shutil, platform, socket, webbrowser, ipaddress, importlib, time
 from typing import Optional
 from dataclasses import dataclass
@@ -33,13 +46,13 @@ def _selftest_verification_parsing():  # dev aid, invoked via --selftest-verific
     assert stats == {'ok':120,'missing':0,'mismatched':0,'total':120}, "parse_verification_summary failed selftest"
     print("[selftest] SUCCESS")
 
- # (restored verification helpers header)
+ # NOTE: Transitional marker retained briefly during refactor; safe to remove when stable.
 
 # ---- verification helpers (shared GUI + headless) ----
 _VERIFICATION_RE = None
 def parse_verification_summary(text: str):
     """Parse verification stdout summary lines into a dict.
-    Pattern: OK=\d+ Missing=\d+ Mismatched=\d+ Total=\d+
+    Pattern: OK=\\d+ Missing=\\d+ Mismatched=\\d+ Total=\\d+
     Cached regex compiled on first use to avoid recompilation in repeated calls.
     """
     if not text:
@@ -54,6 +67,22 @@ def parse_verification_summary(text: str):
             ok, missing, mismatched, total = map(int, m.groups())
             return {'ok':ok,'missing':missing,'mismatched':mismatched,'total':total}
     return {'ok':None,'missing':None,'mismatched':None,'total':None}
+
+# ---- pure validation helper (GUI-independent; used in tests) ----
+def validate_required_fields(url: str, dest: str, ip_text: str, build_docker: bool, docker_name: str) -> list[str]:
+    """Return a list of human-readable validation errors for required core fields.
+    Keeps GUI validation testable in headless mode.
+    """
+    errs: list[str] = []
+    if not (url or '').strip():
+        errs.append('Website URL required')
+    if not (dest or '').strip():
+        errs.append('Destination Folder required')
+    if not (ip_text or '').strip():
+        errs.append('Bind IP invalid')
+    if build_docker and not (docker_name or '').strip():
+        errs.append('Docker image name required when building')
+    return errs
 
 def run_verification(manifest_path: str, fast: bool=True, docker_name: str|None=None, project_dir: str|None=None, readme: bool=True, output_cb=None):
     """Invoke verification script and enrich manifest/README.
@@ -579,6 +608,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--verify-deep', action='store_true', help='Deep verification (do not skip missing)')
     parser.add_argument('--verify-fast', action='store_true', help='Alias of --verify-after (fast mode)')
     parser.add_argument('--selftest-verification', action='store_true', help='Run internal verification parsing self-test and exit')
+    parser.add_argument('--profile', action='store_true', help='Emit simple JSON with elapsed phase timing metrics at end')
 
     args = parser.parse_args(argv)
 
@@ -627,17 +657,22 @@ def headless_main(argv: list[str]) -> int:
             wget_cmd += ['--http-password', args.auth_pass]
             print('[info] Using HTTP authentication (password not shown).')
 
+    import time as _time
+    _t0 = _time.time()
     print('[clone] Running wget2...')
     rc = _cli_run_stream(wget_cmd)
     if rc != 0:
         print(f"[error] wget2 exited with code {rc}")
         return rc
+    _t_clone_end = _time.time()
     print('[clone] Complete.')
 
     # Prepare Dockerfile & nginx.conf
     site_root = find_site_root(output_folder)
     # Optional prerender step
+    _t_prer_start = None; _t_prer_end = None
     if args.prerender:
+        _t_prer_start = _time.time()
         try:
             _run_prerender(
                 start_url=args.url,
@@ -660,6 +695,7 @@ def headless_main(argv: list[str]) -> int:
             )
         except Exception as e:
             print(f"[warn] Prerender failed: {e}")
+        _t_prer_end = _time.time()
     # Optional checksum + manifest (headless mode lightweight version)
     if not args.no_manifest:
         try:
@@ -749,15 +785,18 @@ def headless_main(argv: list[str]) -> int:
 
     docker_success = False
     image = (args.docker_name or 'site').strip()
+    _t_build_start = None; _t_build_end = None
     if args.build:
         if not docker_available():
             print('[warn] Docker not installed. Skipping build.')
         else:
+            _t_build_start = _time.time()
             print(f"[build] docker build -t {image} {output_folder}")
             rc = _cli_run_stream(['docker','build','-t', image, output_folder])
             docker_success = (rc == 0)
             if not docker_success:
                 print('[error] Docker build failed.')
+            _t_build_end = _time.time()
 
     # Optional run
     started = False
@@ -819,6 +858,23 @@ def headless_main(argv: list[str]) -> int:
             pass
 
     # Write README with headless examples (appends existing content later in code)
+    if args.profile:
+        prof = {}
+        try:
+            prof['clone_seconds'] = round((_t_clone_end - _t0), 4)
+            if _t_prer_start and _t_prer_end:
+                prof['prerender_seconds'] = round((_t_prer_end - _t_prer_start), 4)
+            if _t_build_start and _t_build_end:
+                prof['build_seconds'] = round((_t_build_end - _t_build_start), 4)
+            prof['total_seconds'] = round((_time.time() - _t0), 4)
+            prof['parallel_jobs'] = int(args.jobs or 1)
+            prof['checksums'] = bool(args.checksums)
+            prof['prerender'] = bool(args.prerender)
+            prof['build'] = bool(args.build)
+            import json
+            print('\n[profile] ' + json.dumps(prof, indent=2))
+        except Exception:
+            pass
     return 0
 
 def _cli_run_stream(cmd: list[str]) -> int:
@@ -2104,14 +2160,7 @@ class DockerClonerGUI(QWidget):
         icon_row.addStretch(1)
         card_layout.addLayout(icon_row)
 
-        # Interface options (Advanced Mode toggle)
-        self.interface_frame = QFrame(); iface = QHBoxLayout(self.interface_frame); iface.setContentsMargins(0,0,0,0)
-        self.advanced_mode_checkbox = QCheckBox("Advanced Mode")
-        self.advanced_mode_checkbox.setToolTip("Toggle to show expanded advanced sections by default. When off, sections remain but start collapsed.")
-        self.advanced_mode_checkbox.setChecked(False)
-        self.advanced_mode_checkbox.stateChanged.connect(self._apply_advanced_mode)
-        iface.addWidget(self.advanced_mode_checkbox); iface.addStretch(1)
-        card_layout.addWidget(self.interface_frame)
+    # (Advanced Mode toggle removed; sections manage their own collapsed state.)
 
         # ---------- DEPENDENCIES ----------
         self.deps_frame = QFrame(); deps = QHBoxLayout(self.deps_frame); deps.setContentsMargins(0,0,0,0)
@@ -2145,7 +2194,40 @@ class DockerClonerGUI(QWidget):
         dest_row = QHBoxLayout()
         self.save_path_display = QLineEdit(); self.save_path_display.setReadOnly(True)
         browse_btn = QPushButton("Browse"); browse_btn.setObjectName("ghostBtn"); browse_btn.clicked.connect(self.browse_folder)
-        dest_row.addWidget(self.save_path_display, 1); dest_row.addWidget(browse_btn, 0)
+        # Recent destinations menu
+        from PySide6.QtWidgets import QMenu as _QMenu
+        self.recent_dest_btn = QPushButton("Recent"); self.recent_dest_btn.setObjectName("ghostBtn")
+        self.recent_dest_btn.setEnabled(True)
+        def _populate_recent_menu():
+            menu = _QMenu(self.recent_dest_btn)
+            items = []
+            try:
+                if self.settings:
+                    raw = self.settings.value('recent_dests', '', type=str) or ''
+                    raw = str(raw)
+                    items = [p for p in raw.split('\n') if p.strip()]
+            except Exception:
+                items = []
+            if not items:
+                act = menu.addAction('(none)')
+                act.setEnabled(False)
+            else:
+                for p in items:
+                    def make_set(path=p):
+                        def _():
+                            self.save_path_display.setText(path)
+                            self._update_clone_button_state()
+                        return _
+                    menu.addAction(p, make_set())
+            return menu
+        def _show_recent_menu():
+            try:
+                menu = _populate_recent_menu()
+                menu.exec(self.recent_dest_btn.mapToGlobal(self.recent_dest_btn.rect().bottomLeft()))
+            except Exception:
+                pass
+        self.recent_dest_btn.clicked.connect(_show_recent_menu)
+        dest_row.addWidget(self.save_path_display, 1); dest_row.addWidget(browse_btn, 0); dest_row.addWidget(self.recent_dest_btn, 0)
         source_grid.addWidget(self.lbl_dest, 1, 0); source_grid.addLayout(dest_row, 1, 1, 1, 2)
         card_layout.addLayout(source_grid)
 
@@ -2169,7 +2251,7 @@ class DockerClonerGUI(QWidget):
         build_grid.addWidget(self.build_checkbox, 0, 0, 1, 3)
 
         self.lbl_img = QLabel("Docker Image Name:"); self.lbl_img.setProperty("role", "title")
-        self.docker_name_input = QLineEdit(); self.docker_name_input.textChanged.connect(self.refresh_run_buttons)
+        self.docker_name_input = QLineEdit(); self.docker_name_input.setPlaceholderText("e.g., mysite"); self.docker_name_input.textChanged.connect(self.refresh_run_buttons)
         build_grid.addWidget(self.lbl_img, 1, 0); build_grid.addWidget(self.docker_name_input, 1, 1, 1, 2)
 
         self.size_frame = QFrame(); sz = QHBoxLayout(self.size_frame); sz.setContentsMargins(0,0,0,0)
@@ -2177,7 +2259,7 @@ class DockerClonerGUI(QWidget):
         self.size_cap_value = QSpinBox(); self.size_cap_value.setRange(1,1_000_000); self.size_cap_value.setValue(200)
         self.size_cap_unit = QComboBox(); self.size_cap_unit.addItems(["MB","GB","TB"])
         self.size_cap_value.setEnabled(False); self.size_cap_unit.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         sz.addWidget(self.size_cap_checkbox); sz.addSpacing(6); sz.addWidget(self.size_cap_value); sz.addWidget(self.size_cap_unit)
         build_grid.addWidget(self.size_frame, 2, 0, 1, 3)
 
@@ -2186,7 +2268,7 @@ class DockerClonerGUI(QWidget):
         self.throttle_value = QSpinBox(); self.throttle_value.setRange(1,1_000_000); self.throttle_value.setValue(1024)
         self.throttle_unit = QComboBox(); self.throttle_unit.addItems(["KB/s","MB/s"])
         self.throttle_value.setEnabled(False); self.throttle_unit.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         th.addWidget(self.throttle_checkbox); th.addSpacing(6); th.addWidget(self.throttle_value); th.addWidget(self.throttle_unit)
         build_grid.addWidget(self.throttle_frame, 3, 0, 1, 3)
 
@@ -2201,7 +2283,7 @@ class DockerClonerGUI(QWidget):
         self.auth_checkbox.setToolTip("Use basic auth (credentials passed to wget2; consider netrc for higher security).")
         self.auth_user_input = QLineEdit(); self.auth_user_input.setPlaceholderText("User"); self.auth_user_input.setEnabled(False)
         self.auth_pass_input = QLineEdit(); self.auth_pass_input.setPlaceholderText("Password"); self.auth_pass_input.setEchoMode(QLineEdit.EchoMode.Password); self.auth_pass_input.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         auth_layout.addWidget(self.auth_checkbox, 0,0)
         auth_layout.addWidget(self.auth_user_input,0,1)
         auth_layout.addWidget(self.auth_pass_input,0,2)
@@ -2247,14 +2329,33 @@ class DockerClonerGUI(QWidget):
             if path:
                 self.hook_script_path = path; self.console.append(f"Hook script set: {path}")
         self.hook_script_btn.clicked.connect(pick_hook)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         dyn_layout.addWidget(self.prerender_checkbox,0,0,1,2)
         dyn_layout.addWidget(QLabel("Max pages:"),1,0)
         dyn_layout.addWidget(self.prerender_pages_spin,1,1)
         dyn_layout.addWidget(self.capture_api_checkbox,1,2)
         dyn_layout.addWidget(self.no_rewrite_checkbox,1,3)
         dyn_layout.addWidget(self.hook_script_btn,2,0,1,2)
+        from PySide6.QtWidgets import QToolButton as _QToolButton
         self.dynamic_section = CollapsibleSection("Dynamic Rendering", start_collapsed=True)
+        try:
+            dyn_help_btn = _QToolButton(); dyn_help_btn.setText("?")
+            dyn_help_btn.setObjectName("ghostBtn")
+            dyn_help_btn.setToolTip("Prerender pages with a headless browser to capture dynamic content.")
+            def _dyn_help():
+                QMessageBox.information(self, "Dynamic Rendering Help", (
+                    "Prerender uses Playwright to execute JavaScript and capture rendered HTML.\n"
+                    "Options:\n"
+                    " - Max pages: limit prerendered pages\n"
+                    " - Capture API JSON: save JSON responses\n"
+                    " - Keep absolute URLs: do not rewrite links\n"
+                    " - Hook Script: custom Python executed after each prerender."))
+            dyn_help_btn.clicked.connect(_dyn_help)
+            hl = self.dynamic_section.header.layout() if hasattr(self.dynamic_section.header, 'layout') else None
+            if hl:
+                hl.addWidget(dyn_help_btn)
+        except Exception:
+            pass
         self.dynamic_section.setContentLayout(dyn_layout)
         card_layout.addWidget(self.dynamic_section)
 
@@ -2263,18 +2364,18 @@ class DockerClonerGUI(QWidget):
         router_layout = QGridLayout(); router_layout.setHorizontalSpacing(10); router_layout.setVerticalSpacing(6)
         self.router_intercept_checkbox = QCheckBox("Intercept router")
         self.router_intercept_checkbox.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         self.router_hash_checkbox = QCheckBox("Include #hash"); self.router_hash_checkbox.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         self.router_max_routes_spin = _QSpinBox2(); self.router_max_routes_spin.setRange(10,5000); self.router_max_routes_spin.setValue(200); self.router_max_routes_spin.setEnabled(False)
         self.router_settle_spin = _QSpinBox2(); self.router_settle_spin.setRange(0,5000); self.router_settle_spin.setValue(350); self.router_settle_spin.setSuffix(" ms"); self.router_settle_spin.setEnabled(False)
         self.router_wait_selector_edit = QLineEdit(); self.router_wait_selector_edit.setPlaceholderText("Wait selector (optional)"); self.router_wait_selector_edit.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         self.router_allow_edit = QLineEdit(); self.router_allow_edit.setPlaceholderText("Allow regex list"); self.router_allow_edit.setEnabled(False)
         self.router_deny_edit = QLineEdit(); self.router_deny_edit.setPlaceholderText("Deny regex list"); self.router_deny_edit.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         self.router_quiet_checkbox = QCheckBox("Quiet logging"); self.router_quiet_checkbox.setEnabled(False)
-    # (Enable logic unified later via self._bind_enable)
+        # (Enable logic unified later via self._bind_enable)
         router_layout.addWidget(self.router_intercept_checkbox,0,0)
         router_layout.addWidget(self.router_hash_checkbox,0,1)
         router_layout.addWidget(QLabel("Max routes:"),1,0)
@@ -2288,6 +2389,25 @@ class DockerClonerGUI(QWidget):
         router_layout.addWidget(self.router_deny_edit,4,1,1,3)
         router_layout.addWidget(self.router_quiet_checkbox,5,0)
         self.router_section = CollapsibleSection("SPA Router", start_collapsed=True)
+        try:
+            router_help_btn = _QToolButton(); router_help_btn.setText("?")
+            router_help_btn.setObjectName("ghostBtn")
+            router_help_btn.setToolTip("Intercept client-side router navigation to enumerate routes.")
+            def _router_help():
+                QMessageBox.information(self, "SPA Router Help", (
+                    "Intercept client-side navigation (history/hash) to enumerate routes during prerender.\n"
+                    "Controls:\n"
+                    " - Include #hash: treat hash fragments as unique\n"
+                    " - Max routes: maximum discovered routes\n"
+                    " - Settle: ms to wait after navigation before capture\n"
+                    " - Allow/Deny: regex filters (comma separated)\n"
+                    " - Quiet logging: reduce console noise."))
+            router_help_btn.clicked.connect(_router_help)
+            hl2 = self.router_section.header.layout() if hasattr(self.router_section.header, 'layout') else None
+            if hl2:
+                hl2.addWidget(router_help_btn)
+        except Exception:
+            pass
         self.router_section.setContentLayout(router_layout)
         card_layout.addWidget(self.router_section)
         # Unified enable/disable bindings (after all related widgets created)
@@ -2355,7 +2475,7 @@ class DockerClonerGUI(QWidget):
 
         # Actions row (kept outside the collapsible Run section)
         actions_row = QHBoxLayout()
-        self.clone_btn = QPushButton("Clone  Prepare"); self.clone_btn.setObjectName("primaryBtn"); self.clone_btn.clicked.connect(self.start_clone)
+        self.clone_btn = QPushButton("Clone & Prepare"); self.clone_btn.setObjectName("primaryBtn"); self.clone_btn.clicked.connect(self.start_clone)
         actions_row.addWidget(self.clone_btn)
 
         self.cancel_clone_btn = QPushButton("Cancel Clone"); self.cancel_clone_btn.setObjectName("dangerBtn"); self.cancel_clone_btn.setEnabled(False)
@@ -2369,19 +2489,29 @@ class DockerClonerGUI(QWidget):
 
         self.run_created_btn = QPushButton("Run Created Container"); self.run_created_btn.setObjectName("primaryBtn")
         self.run_created_btn.setEnabled(False)
-        if not docker_available(): self.run_created_btn.setToolTip(f"Docker not found. Install:\n{docker_install_instructions()}")
+        if not docker_available():
+            self.run_created_btn.setToolTip(f"Docker not found. Install:\n{docker_install_instructions()}")
         self.run_created_btn.clicked.connect(self.run_created_container)
         actions_row.addWidget(self.run_created_btn)
 
         self.run_folder_btn = QPushButton("Serve From Folder (no build)"); self.run_folder_btn.setObjectName("primaryBtn")
         self.run_folder_btn.setEnabled(False)
-        if not docker_available(): self.run_folder_btn.setToolTip(f"Docker not found. Install:\n{docker_install_instructions()}")
+        if not docker_available():
+            self.run_folder_btn.setToolTip(f"Docker not found. Install:\n{docker_install_instructions()}")
         self.run_folder_btn.clicked.connect(self.run_from_folder)
         actions_row.addWidget(self.run_folder_btn)
 
         self.stop_btn = QPushButton("Stop Container"); self.stop_btn.setObjectName("dangerBtn")
         self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self.stop_container)
         actions_row.addWidget(self.stop_btn)
+
+        # Open Folder / platform-specific label (disabled until a project directory exists)
+        _open_label = "Reveal in Finder" if sys.platform.startswith("darwin") else "Open Folder"
+        self.open_folder_btn = QPushButton(_open_label); self.open_folder_btn.setObjectName("ghostBtn")
+        self.open_folder_btn.setEnabled(False)
+        self.open_folder_btn.clicked.connect(self.open_project_folder)
+        actions_row.addWidget(self.open_folder_btn)
+
         # Show a single button to trigger the dependencies dialog (only when something is missing)
         self.deps_dialog_btn = QPushButton("Fix Dependencies…"); self.deps_dialog_btn.setObjectName("ghostBtn")
         self.deps_dialog_btn.setVisible(False)
@@ -2428,6 +2558,18 @@ class DockerClonerGUI(QWidget):
 
         # Divider above status bar
         root.addWidget(divider())
+        # Thin progress bar (overall)
+        from PySide6.QtWidgets import QProgressBar as _QProgressBar
+        self.total_progress_bar = _QProgressBar()
+        try:
+            self.total_progress_bar.setRange(0,100)
+            self.total_progress_bar.setValue(0)
+            self.total_progress_bar.setTextVisible(False)
+            self.total_progress_bar.setFixedHeight(6)
+            self.total_progress_bar.setStyleSheet("QProgressBar{background:#d9e1ea;border-radius:3px;} QProgressBar::chunk{background:#2d6fd2;border-radius:3px;}")
+        except Exception:
+            pass
+        root.addWidget(self.total_progress_bar)
         # Status pill (bottom spanning)
         self.status_label = QLabel("No container running"); self.status_label.setObjectName("status"); self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Fixed vertical size, stretch horizontally
@@ -2450,16 +2592,7 @@ class DockerClonerGUI(QWidget):
 
         # timers & init
         self.status_timer = QTimer(); self.status_timer.timeout.connect(self.check_container_status); self.status_timer.start(3000)
-        # Track advanced-designated sections for collapse logic
-        self._advanced_sections = [
-            self.auth_section,
-            self.perf_section,
-            self.dynamic_section,
-            self.router_section,
-            self.integrity_section,
-        ]
-        self._apply_advanced_mode()  # initialize collapsed state
-        self.set_advanced_mode(False)  # backward compatibility no-op
+        # (Advanced sections previously tracked for a toggle; feature removed)
         self._align_label_column()
         self.refresh_run_buttons()
         # Load previous window geometry if available, then finalize sizing
@@ -2483,6 +2616,20 @@ class DockerClonerGUI(QWidget):
         except Exception:
             pass
         self._update_verify_state()
+        # Install live validation & load recent destination, hide progress bar initially
+        try:
+            self._install_live_validation()
+        except Exception:
+            pass
+        try:
+            self._load_recent_dests()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'total_progress_bar'):
+                self.total_progress_bar.setVisible(False)
+        except Exception:
+            pass
 
     def _set_scaled_margins(self, layout: QLayout | None, left, top, right, bottom):
         if layout is None:
@@ -2530,6 +2677,29 @@ class DockerClonerGUI(QWidget):
         except Exception as e:
             try:
                 QMessageBox.warning(self, "Save Log", f"Failed to save log: {e}")
+            except Exception:
+                pass
+
+    def open_project_folder(self):
+        """Open the most recent project directory in the system file manager.
+
+        Handles macOS, Windows, and Linux; shows an informational dialog if the path
+        is not yet available and a warning dialog if invocation fails.
+        """
+        try:
+            path = self.last_project_dir
+            if not path or not os.path.isdir(path):
+                QMessageBox.information(self, "Open Folder", "No project folder available yet.")
+                return
+            if sys.platform.startswith("darwin"):
+                subprocess.run(["open", path])
+            elif os.name == "nt":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                subprocess.run(["xdg-open", path])
+        except Exception as e:
+            try:
+                QMessageBox.warning(self, "Open Folder", f"Failed to open: {e}")
             except Exception:
                 pass
 
@@ -2704,31 +2874,81 @@ class DockerClonerGUI(QWidget):
                 self._finalize_sizing()
         except Exception:
             pass
-
-    # ----- advanced toggle -----
-    def set_advanced_mode(self, enabled: bool):
-        # Collapsible section controls visibility; no-op kept for backward compatibility
-        return
-
-    # ----- advanced mode internal handler -----
-    def _apply_advanced_mode(self):
-        adv = bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, 'advanced_mode_checkbox') else False
-        # Short-circuit if no change
-        prev = getattr(self, '_adv_prev', None)
-        if prev is not None and prev == adv:
-            return
-        self._adv_prev = adv
-        # If not advanced mode, collapse tracked sections (headers remain for discoverability)
-        for sec in getattr(self, '_advanced_sections', []):
+    # ----- live validation / destinations persistence -----
+    def _install_live_validation(self):
+        try:
+            if hasattr(self.url_input, 'lineEdit'):
+                le = self.url_input.lineEdit()
+                if le:
+                    le.textChanged.connect(self._update_clone_button_state)
+        except Exception:
+            pass
+        for w_name in ('bind_ip_input','docker_name_input'):
             try:
-                if not adv and sec.is_expanded():
-                    sec.set_collapsed(True)
-                elif adv and not sec.is_expanded():
-                    # Expand a couple of the most relevant advanced sections for quick access
-                    if sec in (self.perf_section, self.dynamic_section):
-                        sec.set_collapsed(False)
+                w = getattr(self, w_name, None)
+                if w:
+                    w.textChanged.connect(self._update_clone_button_state)
             except Exception:
                 pass
+        try:
+            self.build_checkbox.stateChanged.connect(self._update_clone_button_state)
+        except Exception:
+            pass
+        self._update_clone_button_state()
+
+    def _collect_validation_errors(self):
+        try:
+            try:
+                url = self.url_input.currentText().strip()
+            except Exception:
+                url = ''
+            save_path = self.save_path_display.text().strip()
+            ip_text = normalize_ip(self.bind_ip_input.text())
+            docker_name = self.docker_name_input.text().strip()
+            build_on = self.build_checkbox.isChecked()
+            return validate_required_fields(url, save_path, ip_text, build_on, docker_name)
+        except Exception:
+            return []
+
+    def _update_clone_button_state(self):
+        errs = self._collect_validation_errors()
+        disable = bool(errs) or bool(self.clone_thread and self.clone_thread.isRunning())
+        try:
+            self.clone_btn.setEnabled(not disable)
+            self.clone_btn.setToolTip("Cannot start:\n - " + "\n - ".join(errs) if errs else "")
+        except Exception:
+            pass
+
+    def _remember_recent_dest(self, path: str):
+        if not path or not self.settings:
+            return
+        try:
+            stored_raw = self.settings.value('recent_dests', '', type=str)
+            stored = str(stored_raw) if stored_raw is not None else ''
+            items = [p for p in stored.split('\n') if isinstance(p, str) and p.strip()]
+            if path in items:
+                items.remove(path)
+            items.insert(0, path)
+            items = items[:8]
+            self.settings.setValue('recent_dests', '\n'.join(items))
+        except Exception:
+            pass
+
+    def _load_recent_dests(self):
+        if not self.settings:
+            return
+        try:
+            cur = self.save_path_display.text().strip()
+            if cur:
+                return
+            stored_raw = self.settings.value('recent_dests', '', type=str)
+            stored = str(stored_raw) if stored_raw is not None else ''
+            first = stored.split('\n')[0].strip() if isinstance(stored, str) and stored else ''
+            if first and os.path.isdir(first):
+                self.save_path_display.setText(first)
+                self._update_clone_button_state()
+        except Exception:
+            pass
 
     # ----- helpers -----
     def _align_label_column(self):
@@ -3005,6 +3225,16 @@ class DockerClonerGUI(QWidget):
         snapshot = self._snapshot_inputs()
         if not snapshot:
             return
+        # Show overall progress bar (fade in)
+        try:
+            if hasattr(self, 'total_progress_bar') and self.total_progress_bar:
+                self.total_progress_bar.setValue(0)
+                if hasattr(self, '_fade_progress'):
+                    self._fade_progress(True)
+                else:
+                    self.total_progress_bar.setVisible(True)
+        except Exception:
+            pass
         self.console.clear()
         if snapshot.estimate_first:
             self.console.append("Estimation prepass: enabled")
@@ -3120,6 +3350,20 @@ class DockerClonerGUI(QWidget):
         router_quiet: bool
 
     def _snapshot_inputs(self) -> Optional['_ConfigSnapshot']:
+        """Validate and capture current form inputs into a _ConfigSnapshot.
+
+        Performs:
+          - Dependency check for wget2
+          - Guard against starting while a container is already running
+          - Required field validation (URL, destination, bind IP, image name when building)
+          - Inline visual highlight of invalid widgets (temporary red border)
+          - Resume detection counting existing + partial files
+          - Optional port conflict prompt with opportunity to choose a new port
+          - Construction of target project directory name/path
+
+        Returns:
+          _ConfigSnapshot instance if all validation passes, else None.
+        """
         if not is_wget2_available():
             self.console.append("Required dependency missing: wget2. Click 'Fix Dependencies…' to copy an install command.")
             return None
@@ -3135,22 +3379,49 @@ class DockerClonerGUI(QWidget):
         host_port = self.port_input.value()
         container_port = self.cport_input.value()
         ip_text = normalize_ip(self.bind_ip_input.text())
-        if not url or not save_path:
-            self.console.append('Website URL and Destination Folder are required.')
-            return None
+        # Inline validation with transient highlight
+        invalid = []
+        def flash(widget):
+            try:
+                orig = widget.styleSheet()
+                widget.setStyleSheet(orig + ';border:2px solid #c0392b;')
+                QTimer.singleShot(1400, lambda: widget.setStyleSheet(orig))
+            except Exception:
+                pass
+        if not url:
+            invalid.append((self.url_input, 'Website URL is required.'))
+        if not save_path:
+            invalid.append((self.save_path_display, 'Destination Folder is required.'))
         if not ip_text:
-            self.console.append('Invalid Bind IP.')
-            return None
+            invalid.append((self.bind_ip_input, 'Invalid Bind IP.'))
         if self.build_checkbox.isChecked() and not docker_name:
-            self.console.append('Docker image name is required when building an image.')
+            invalid.append((self.docker_name_input, 'Docker image name required when building an image.'))
+        if invalid:
+            for w, msg in invalid:
+                flash(w)
+            self.console.append("Validation errors:\n - " + "\n - ".join(m for _, m in invalid))
+            try:
+                self.clone_btn.setEnabled(False)
+            except Exception:
+                pass
             return None
+        else:
+            try:
+                if self.container_id is None and (not self.clone_thread or not self.clone_thread.isRunning()):
+                    self.clone_btn.setEnabled(True)
+            except Exception:
+                pass
         self.current_host_ip = ip_text
         self.current_port = host_port
         self.current_container_port = container_port
         project_dir_name = docker_name if docker_name else 'site'
         self.last_project_dir = os.path.abspath(os.path.join(save_path, project_dir_name))
+        try:
+            if hasattr(self, 'open_folder_btn') and self.open_folder_btn:
+                self.open_folder_btn.setEnabled(True)
+        except Exception:
+            pass
         self.update_status(False, cid=None)
-        # resume detection
         try:
             resume = os.path.isdir(self.last_project_dir) and any(True for _ in os.scandir(self.last_project_dir))
         except Exception:
@@ -3637,9 +3908,22 @@ class DockerClonerGUI(QWidget):
         # Disable the main card to block usage when requirements are missing
         self.card.setEnabled(enabled)
 
-    # (legacy wget2 gate removed; dependency gating handled by run_dependency_dialog_if_needed)
+    # Dependency gating centralized in run_dependency_dialog_if_needed.
 
     def clone_finished(self, log, docker_success, clone_success):
+        """Finalize UI and status after the clone/build worker finishes.
+
+        Args:
+            log: (unused legacy param from older signal signature; retained for compatibility)
+            docker_success: whether any requested Docker build step succeeded
+            clone_success: whether the wget2 clone phase reported success
+
+        Side-effects:
+            - Restores buttons / resume state
+            - Emits user notifications
+            - Fades out progress bar (animated if supported)
+            - Updates status line & verification badge visibility
+        """
         self.console.append("\nProcess finished.")
         self.refresh_run_buttons()
         self.update_status(False, cid=None)
@@ -3658,23 +3942,53 @@ class DockerClonerGUI(QWidget):
             QMessageBox.information(self, "Clone Completed", "Website clone completed successfully. You can build or run now.")
         else:
             QMessageBox.warning(self, "Clone Failed", "Website cloning failed. You can fix the issue and run Clone again to resume.")
+        # Fade out overall progress bar
+        try:
+            if hasattr(self, '_fade_progress'):
+                self._fade_progress(False)
+            elif hasattr(self, 'total_progress_bar') and self.total_progress_bar:
+                self.total_progress_bar.setVisible(False)
+        except Exception:
+            pass
 
     def update_total_progress(self, percent: int, phase: str):
+        """Update consolidated progress bar while enforcing intra-phase monotonicity."""
+        # Guard & clamp percent; ignore regressions unless phase changes
+        try:
+            pct = int(percent)
+        except Exception:
+            pct = 0
+        if pct < 0:
+            pct = 0
+        if pct > 100:
+            pct = 100
+        prev_phase = getattr(self, '_current_phase_title', None)
+        prev_pct = getattr(self, '_current_percent', -1)
         phase_title = {
-            "clone": "Cloning",
-            "prerender": "Prerender (dynamic pages)",
-            "build": "Docker build",
-            "cleanup": "Cleanup"
+            'clone': 'Cloning',
+            'prerender': 'Prerender (dynamic pages)',
+            'build': 'Docker build',
+            'cleanup': 'Cleanup'
         }.get(phase, phase.title())
-        self._current_percent = percent
+        # Only accept lower progress if phase advanced
+        if pct < prev_pct and phase_title == prev_phase:
+            return
+        self._current_percent = pct
         self._current_phase_title = phase_title
+        try:
+            if hasattr(self, 'total_progress_bar') and self.total_progress_bar:
+                self.total_progress_bar.setValue(pct)
+        except Exception:
+            pass
         self._rebuild_status_line()
 
     def update_bandwidth(self, rate: str):
+        """Record current formatted bandwidth rate and refresh the aggregated status line."""
         self._current_rate = rate
         self._rebuild_status_line()
 
     def update_api_capture(self, count: int):
+        """Update API request capture count with throttled UI repaint conditions."""
         # Throttle UI refresh to avoid excessive updates on high-frequency API responses
         import time
         now = time.time()
@@ -3691,6 +4005,7 @@ class DockerClonerGUI(QWidget):
             self._rebuild_status_line()
 
     def update_router_count(self, count: int):
+        """Update discovered route count for SPA interception (throttled like API count)."""
         import time
         now = time.time()
         last_time = getattr(self, '_last_router_ui_emit_time', 0.0)
@@ -3723,6 +4038,51 @@ class DockerClonerGUI(QWidget):
         else:
             text = suffix
         self._set_status_text_elided(text)
+
+    # --- progress bar fade helper (inserted late to avoid forward ref issues) ---
+    def _fade_progress(self, show: bool):  # safe fallback if opacity effects unavailable
+        """Animate (or toggle) visibility of the overall progress bar.
+
+        Attempts an opacity animation; if effects/animation unsupported,
+        degrades to immediate show/hide so progress remains visible.
+        """
+        try:
+            if not hasattr(self, 'total_progress_bar') or not self.total_progress_bar:
+                return
+            bar = self.total_progress_bar
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+            from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+            eff = getattr(bar, '_fade_effect', None)
+            if eff is None:
+                eff = QGraphicsOpacityEffect(bar)
+                bar.setGraphicsEffect(eff)
+                setattr(bar, '_fade_effect', eff)
+            anim = getattr(bar, '_fade_anim', None)
+            if anim is not None:
+                try: anim.stop()
+                except Exception: pass
+            anim = QPropertyAnimation(eff, b"opacity", bar)
+            anim.setDuration(260)
+            anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+            start = eff.opacity() if not show else 0.0
+            end = 1.0 if show else 0.0
+            if show and not bar.isVisible():
+                bar.setVisible(True)
+            if show and eff.opacity() > 0.95:
+                return
+            anim.setStartValue(start)
+            anim.setEndValue(end)
+            def _finish():
+                if not show:
+                    bar.setVisible(False)
+            anim.finished.connect(_finish)
+            setattr(bar, '_fade_anim', anim)
+            anim.start()
+        except Exception:
+            try:
+                self.total_progress_bar.setVisible(show)
+            except Exception:
+                pass
 
 # ---------- main ----------
 if __name__ == "__main__":
