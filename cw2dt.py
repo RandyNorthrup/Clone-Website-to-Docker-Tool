@@ -1053,9 +1053,17 @@ class CloneThread(QThread):
         docker_success = False
         clone_success = False
 
-        def log_msg(m):
-            log.append(m)
-            self.progress.emit(m)
+        def _now_ts():
+            return datetime.utcnow().strftime('%H:%M:%S')
+
+        def log_msg(message: str, phase: str | None = None):
+            """Emit a standardized progress line with timestamp and optional phase label."""
+            if phase:
+                line = f"[{_now_ts()}] [{phase}] {message}"
+            else:
+                line = f"[{_now_ts()}] {message}"
+            log.append(line)
+            self.progress.emit(line)
 
         # init overall progress tracking with dynamic optional phases
         phases = ["clone"]
@@ -1120,11 +1128,11 @@ class CloneThread(QThread):
             try:
                 est = self._estimate_with_spider(self.url)
                 if est > 0:
-                    self.progress.emit(f"Estimated items to fetch: ~{est}")
+                    log_msg(f"Estimated items to fetch: ~{est}", phase="estimate")
                 else:
-                    self.progress.emit("Estimate: could not determine item count (proceeding)")
+                    log_msg("Estimate: could not determine item count (proceeding)", phase="estimate")
             except Exception as e:
-                self.progress.emit(f"Estimate failed: {e} (proceeding)")
+                log_msg(f"Estimate failed: {e} (proceeding)", phase="estimate")
         if self._stop_requested:
             log_msg("Clone canceled before start.")
             self.finished.emit("\n".join(log), docker_success, clone_success); return
@@ -1143,14 +1151,14 @@ class CloneThread(QThread):
             wget_cmd += ["--load-cookies", self.cookies_file]
         if self.parallel_jobs > 1:
             wget_cmd += ["-j", str(self.parallel_jobs)]
-            self.progress.emit(f"Using wget2 with {self.parallel_jobs} parallel jobs.")
+            log_msg(f"Using wget2 with {self.parallel_jobs} parallel jobs.", phase="clone")
         if self.size_cap: wget_cmd += ["--quota", human_quota_suffix(self.size_cap)]
         if self.throttle: wget_cmd += ["--limit-rate", human_rate_suffix(self.throttle)]
         if self.http_user:
             wget_cmd += ["--http-user", self.http_user]
             if self.http_password is not None:
                 wget_cmd += ["--http-password", self.http_password]
-            self.progress.emit("Using HTTP authentication for cloning (credentials not shown).")
+            log_msg("Using HTTP authentication for cloning (credentials not shown).", phase="clone")
 
         try:
             if not self._run_wget_with_progress(wget_cmd, emit_total):
@@ -1163,9 +1171,9 @@ class CloneThread(QThread):
             try:
                 post_total, post_partials = count_files_and_partials(output_folder)
                 new_files = max(0, post_total - self.pre_existing_count)
-                self.progress.emit(
-                    f"Files: existing before={self.pre_existing_count}, partial before={self.pre_partial_count}, new downloaded={new_files}"
-                )
+                log_msg(
+                    f"Files: existing before={self.pre_existing_count}, partial before={self.pre_partial_count}, new downloaded={new_files}",
+                    phase="clone")
             except Exception:
                 pass
         except Exception as e:
@@ -1179,7 +1187,7 @@ class CloneThread(QThread):
         # Optional prerender (performed before JS stripping / Docker build)
         if self.prerender and not self._stop_requested:
             try:
-                self.progress.emit(f"Starting prerender (max {self.prerender_max_pages} pages)...")
+                log_msg(f"Starting prerender (max {self.prerender_max_pages} pages)...", phase="prerender")
                 emit_total("prerender", 0)
                 _run_prerender(
                     start_url=self.url,
@@ -1202,18 +1210,18 @@ class CloneThread(QThread):
                     router_route_cb=(lambda n: (setattr(self, '_router_discovered_count', n), self.router_count.emit(n))[1]) if self.router_intercept else None,
                     router_quiet=self.router_quiet
                 )
-                self.progress.emit("Prerender complete (100%).")
+                log_msg("Prerender complete (100%).", phase="prerender")
             except Exception as e:
-                self.progress.emit(f"Prerender failed: {e}")
+                log_msg(f"Prerender failed: {e}", phase="prerender")
         # Optionally strip scripts from HTML to prevent JS execution
         if self.disable_js:
             try:
                 scanned, stripped = self._strip_js_from_html(site_root)
-                log_msg(f"JavaScript disabled: stripped <script> tags from {stripped}/{scanned} HTML files.")
+                log_msg(f"JavaScript disabled: stripped <script> tags from {stripped}/{scanned} HTML files.", phase="post")
             except Exception as e:
-                log_msg(f"Warning: failed to strip JS: {e}")
+                log_msg(f"Warning: failed to strip JS: {e}", phase="post")
         rel_root = os.path.relpath(site_root, output_folder)
-        log_msg(f"Site root detected: {rel_root}")
+        log_msg(f"Site root detected: {rel_root}", phase="post")
 
         # Dockerfile & nginx.conf tuned to container_port
         dockerfile_path = os.path.join(output_folder, "Dockerfile")
@@ -1225,7 +1233,7 @@ class CloneThread(QThread):
                 f"EXPOSE {self.container_port}\n"
                 "CMD [\"nginx\", \"-g\", \"daemon off;\"]\n"
             )
-        log_msg("Dockerfile created.")
+        log_msg("Dockerfile created.", phase="build")
 
         nginx_conf_path = os.path.join(output_folder, "nginx.conf")
         with open(nginx_conf_path, "w", encoding="utf-8") as f:
@@ -1241,7 +1249,7 @@ class CloneThread(QThread):
             parts.append("    location / { try_files $uri $uri/ =404; }\n")
             parts.append("}\n")
             f.write("".join(parts))
-        log_msg("nginx.conf created.")
+        log_msg("nginx.conf created.", phase="build")
 
         # Optional docker build with cleanup after success
         if self.build_docker and not self._stop_requested:
@@ -1249,20 +1257,20 @@ class CloneThread(QThread):
                 log_msg("Skipping build: Docker image name is required when 'Build image' is checked.")
             elif docker_available():
                 try:
-                    log_msg("Building Docker image (0%)...")
+                    log_msg("Building Docker image (0%)...", phase="build")
                     emit_total("build", 0)
                     if self._run_docker_build_with_progress(output_folder, self.docker_name, emit_total):
                         docker_success = True
-                        log_msg("Docker build complete (100%). Cleaning up build inputs...")
+                        log_msg("Docker build complete (100%). Cleaning up build inputs...", phase="build")
                         emit_total("build", 100)
                         self._cleanup_with_progress(output_folder, emit_total, keep_rel_root=rel_root)
                     else:
-                        log_msg(f"Install Docker with:\n{docker_install_instructions()}")
+                        log_msg(f"Install Docker with:\n{docker_install_instructions()}", phase="build")
                 except Exception as e:
-                    log_msg(f"Error building Docker image: {e}")
+                    log_msg(f"Error building Docker image: {e}", phase="build")
             else:
-                log_msg("Docker not installed.")
-                log_msg(f"Install with:\n{docker_install_instructions()}")
+                log_msg("Docker not installed.", phase="build")
+                log_msg(f"Install with:\n{docker_install_instructions()}", phase="build")
 
         # README (last, reflects final state)
         abs_output = os.path.abspath(output_folder)
@@ -1523,7 +1531,7 @@ class CloneThread(QThread):
                         rf.write("```bash\n" + " \\\n+  ".join(repro) + "\n```\n")
                 except Exception:
                     pass
-                log_msg("Manifest written.")
+                log_msg("Manifest written.", phase="post")
             except Exception as e:
                 self.progress.emit(f"Manifest write failed: {e}")
 
