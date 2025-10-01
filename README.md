@@ -45,6 +45,8 @@ A desktop + CLI utility to clone public or private websites using **wget2** (par
   - Live bandwidth display (current transfer rate)
   - Live API capture counter during prerender (throttled updates)
     - Live router route discovery counter (when interception enabled)
+  - Two‑phase Recommendation Wizard (scan + results apply)
+  - Save / Load configuration profiles (reusable loadouts)
 - **Cross-platform**: macOS, Linux, Windows
 - **Fail-soft optional features**: prerender gracefully skipped if Playwright not installed
 
@@ -89,6 +91,51 @@ GUI Layout Notes:
 - The center split position (between configuration and console) is fixed to prevent accidental layout shifts.
 - You can still expand available console/log space by resizing the window horizontally: the left edge remains anchored and only the right edge grows (the configuration panel width is constant; the console expands).
 - Vertical overflow in the configuration area is scrollable; horizontal scrolling is suppressed for readability.
+
+### Wizard & Profiles
+
+The GUI includes a two‑phase Recommendation Wizard and profile management:
+
+#### Phase 1 – Scan
+
+- Performs a lightweight fetch of the root URL (capped ~250KB) and heuristic analysis.
+- Detects common SPA frameworks (React, Vue, Angular, Next.js, Nuxt, Svelte), script density, payload size.
+- Attempts an item estimate (wget2 spider) when possible.
+- Generates human-readable heuristic reasons supporting each recommendation.
+
+#### Phase 2 – Results
+
+- Presents a summary (bytes fetched, script count, frameworks, estimated items, reasons).
+- Lets you toggle and Apply recommended settings:
+  - Prerender (dynamic rendering)
+  - Router interception (SPA route discovery)
+  - JavaScript stripping (harden output)
+  - Checksums + verify (integrity phase)
+  - Incremental + diff state tracking
+- Apply updates the main form; you can still manually tweak afterward.
+
+Profiles:
+
+- Use Save Config to store the current settings as a JSON profile under `~/.cw2dt_profiles/`.
+- Use Load Config to quickly recall a prior configuration (e.g., staging vs prod mirror strategies).
+- Profile files are human-editable; removing a file removes it from the list.
+- Suggested name defaults to the Docker name field; invalid filename characters are sanitized.
+
+Typical Workflow:
+
+1. Enter URL → Run Wizard → Apply.
+2. Optionally adjust advanced checkboxes (e.g., hook script or checksum extensions).
+3. Save Config for reuse.
+4. Clone.
+
+Heuristic Hints:
+
+- Large script count (> ~15) or known framework markers → enable prerender.
+- Detected framework + dynamic navigation hints → enable router interception.
+- Very small payload + few scripts → prerender likely unnecessary.
+- Heavy scripts but no framework markers → prerender still suggested (dynamic content suspected).
+
+The Wizard intentionally keeps the scan shallow for speed; you can still refine settings manually for complex sites.
 
 ### CLI
 
