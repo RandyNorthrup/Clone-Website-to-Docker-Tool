@@ -159,7 +159,7 @@ class DockerClonerGUI(QWidget):
         self.btn_estimate=QPushButton('Estimate'); row1.addWidget(self.btn_estimate)
         self.btn_pause=QPushButton('Pause'); self.btn_pause.setEnabled(False); row1.addWidget(self.btn_pause)
         self.btn_cancel=QPushButton('Cancel'); self.btn_cancel.setEnabled(False); row1.addWidget(self.btn_cancel)
-        self.btn_wizard=QPushButton('Wizard'); row1.addWidget(self.btn_wizard)
+        self.btn_wizard=QPushButton('Wizard'); row1.addWidget(self.btn_wizard); self.btn_wizard.setEnabled(False)
         row1.addStretch(1)
         row2=QHBoxLayout(); row2.setSpacing(6)
         self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
@@ -176,6 +176,12 @@ class DockerClonerGUI(QWidget):
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self.btn_wizard.clicked.connect(self._run_wizard)
+        # Enable Wizard only when a non-empty URL is present
+        def _update_wizard_enabled(txt:str):
+            self.btn_wizard.setEnabled(bool(txt.strip()))
+        self.url_in.textChanged.connect(_update_wizard_enabled)
+        # Initialize state based on any pre-populated URL (e.g., history load)
+        _update_wizard_enabled(self.url_in.text())
         self.btn_save_cfg.clicked.connect(self._save_profile_dialog)
         self.btn_load_cfg.clicked.connect(self._load_profile_dialog)
         self._load_history()
@@ -264,6 +270,11 @@ class DockerClonerGUI(QWidget):
             self.cookies_file.setText(data.get('cookies_file',''))
             self.chk_import_browser_cookies.setChecked(bool(data.get('import_browser_cookies')))
             self.plugins_dir.setText(data.get('plugins_dir',''))
+            # Refresh wizard availability after loading profile
+            try:
+                self.btn_wizard.setEnabled(bool(self.url_in.text().strip()))
+            except Exception:
+                pass
         except Exception as e:
             QMessageBox.warning(self,'Profile Load','Failed to apply profile: '+str(e))
     def _save_profile_dialog(self):
