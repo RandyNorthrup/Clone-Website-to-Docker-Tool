@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QTextEdit, QCheckBox, QSpinBox, QMessageBox, QProgressBar, QGroupBox, QComboBox, QSplitter,
     QScrollArea, QToolButton, QFrame, QSizePolicy
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtGui import QPixmap, QIcon
 
 from cw2dt_core import (
@@ -21,12 +21,18 @@ from cw2dt_core import (
 
 class _GuiCallbacks(CloneCallbacks):
     def __init__(self, owner: 'DockerClonerGUI'): self._owner=owner
-    def log(self, message: str): self._owner.sig_log.emit(message)
-    def phase(self, phase: str, pct: int): self._owner.sig_phase.emit(phase, pct)
-    def bandwidth(self, rate: str): self._owner.sig_bandwidth.emit(rate)
-    def api_capture(self, count: int): self._owner.sig_api.emit(count)
-    def router_count(self, count: int): self._owner.sig_router.emit(count)
-    def checksum(self, pct: int): self._owner.sig_checksum.emit(pct)
+    def _pause_gate(self):
+        # If paused, spin until resumed or canceled
+        from PySide6.QtCore import QCoreApplication
+        while getattr(self._owner,'_paused',False) and not self.is_canceled():
+            QCoreApplication.processEvents()
+            time.sleep(0.05)
+    def log(self, message: str): self._pause_gate(); self._owner.sig_log.emit(message)
+    def phase(self, phase: str, pct: int): self._pause_gate(); self._owner.sig_phase.emit(phase, pct)
+    def bandwidth(self, rate: str): self._pause_gate(); self._owner.sig_bandwidth.emit(rate)
+    def api_capture(self, count: int): self._pause_gate(); self._owner.sig_api.emit(count)
+    def router_count(self, count: int): self._pause_gate(); self._owner.sig_router.emit(count)
+    def checksum(self, pct: int): self._pause_gate(); self._owner.sig_checksum.emit(pct)
     def is_canceled(self)->bool:
         w=self._owner.worker
         return bool(getattr(w,'_cancel',False)) if w else False
@@ -63,33 +69,58 @@ class DockerClonerGUI(QWidget):
     sig_log=Signal(str); sig_phase=Signal(str,int); sig_bandwidth=Signal(str); sig_api=Signal(int); sig_router=Signal(int); sig_checksum=Signal(int)
     def __init__(self):
         super().__init__(); self.setWindowTitle('Clone Website to Docker Tool')
-        self.worker=None; self._paused=False; self._last_result=None
+        self.worker=None; self._paused=False; self._last_result=None; self._serve_httpd=None; self._serve_thread=None
+        # Track geometry to enforce right-edge-only horizontal resizing
+        self._anchor_left=None
+        self._last_size=None
         self._build_ui(); self._connect_signals(); self._update_dependency_banner()
         self._weighted={}; self._phase_pct={}; self._phase_start={}; self._phase_end={}
 
     def _add_banner_images(self, layout: QHBoxLayout):
+        """Center three specific logos (web_logo.png, arrow_right.png, docker_logo.png) and set app icon icon.png."""
         try:
             base=os.path.join(os.path.dirname(__file__),'images')
-            if os.path.isdir(base):
-                imgs=[p for p in os.listdir(base) if p.lower().endswith(('.png','.jpg','.jpeg','.gif','.ico'))]
-                imgs.sort()
-                for p in imgs[:3]:
-                    lbl=QLabel(); pm=QPixmap(os.path.join(base,p))
-                    if not pm.isNull(): lbl.setPixmap(pm.scaledToHeight(48, Qt.TransformationMode.SmoothTransformation)); layout.addWidget(lbl)
-            for ic in ('icon.icns','icon.ico'):
-                ip=os.path.join(os.path.dirname(__file__),ic)
-                if os.path.exists(ip): self.setWindowIcon(QIcon(ip)); break
-        except Exception: pass
+            # Set window icon from icon.png if present
+            ic_png=os.path.join(base,'icon.png')
+            if os.path.exists(ic_png):
+                self.setWindowIcon(QIcon(ic_png))
+            else:
+                # fallback chain: root icon.icns, root icon.ico, root icon.png
+                root_dir=os.path.dirname(__file__)
+                for ic in ('icon.icns','icon.ico','icon.png'):
+                    ip=os.path.join(root_dir,ic)
+                    if os.path.exists(ip):
+                        self.setWindowIcon(QIcon(ip)); break
+            logos=['web_logo.png','arrow_right.png','docker_logo.png']
+            layout.addStretch(1)
+            for name in logos:
+                path=os.path.join(base,name)
+                if os.path.exists(path):
+                    pm=QPixmap(path)
+                    if not pm.isNull():
+                        lbl=QLabel(); lbl.setPixmap(pm.scaledToHeight(56, Qt.TransformationMode.SmoothTransformation)); layout.addWidget(lbl)
+            layout.addStretch(1)
+        except Exception:
+            pass
 
     def _build_ui(self):
         root=QVBoxLayout(self); root.setContentsMargins(4,4,4,4)
         banner=QHBoxLayout(); banner.setSpacing(8); self._add_banner_images(banner); root.addLayout(banner)
-        self.splitter=QSplitter(Qt.Orientation.Horizontal); root.addWidget(self.splitter,1)
+        class _NoDragSplitter(QSplitter):
+            def createHandle(self):
+                h=super().createHandle(); h.installEventFilter(self); return h
+            def eventFilter(self,obj,ev):
+                if ev.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove):
+                    return True
+                return QSplitter.eventFilter(self,obj,ev)
+        self.splitter=_NoDragSplitter(Qt.Orientation.Horizontal); self.splitter.setChildrenCollapsible(False); self.splitter.setHandleWidth(0); self.splitter.setStyleSheet("QSplitter::handle{background:transparent; width:0px;}"); root.addWidget(self.splitter,1)
         # Left scrollable config
         config_container=QWidget(); config_v=QVBoxLayout(config_container); config_v.setContentsMargins(4,4,4,4); config_v.setSpacing(6)
-        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(config_container); self.splitter.addWidget(scroll)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(config_container); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); self.splitter.addWidget(scroll)
+        self._config_container=config_container; self._config_scroll=scroll
         # Basic
-        basic=_CollapsibleBox('Basic Settings'); form=QGridLayout(); form.setContentsMargins(0,0,0,0); r=0
+        self._sections=[]
+        basic=_CollapsibleBox('Basic Settings'); self._sections.append(basic); form=QGridLayout(); form.setContentsMargins(0,0,0,0); r=0
         form.addWidget(QLabel('Website URL:'),r,0); self.url_in=QLineEdit(); form.addWidget(self.url_in,r,1,1,2); r+=1
         form.addWidget(QLabel('Destination Folder:'),r,0); self.dest_in=QLineEdit(); form.addWidget(self.dest_in,r,1); b=QPushButton('Browse'); form.addWidget(b,r,2); b.clicked.connect(self._browse_dest); r+=1
         form.addWidget(QLabel('Docker Name:'),r,0); self.name_in=QLineEdit('site'); form.addWidget(self.name_in,r,1,1,2); r+=1
@@ -98,37 +129,52 @@ class DockerClonerGUI(QWidget):
         form.addWidget(QLabel('Container Port:'),r,0); self.cont_port=QSpinBox(); self.cont_port.setRange(1,65535); self.cont_port.setValue(80); form.addWidget(self.cont_port,r,1)
         basic.addLayout(form); config_v.addWidget(basic)
         # Clone options
-        clone=_CollapsibleBox('Clone Options'); self.chk_build=QCheckBox('Build Docker image'); self.chk_run_built=QCheckBox('Run built image'); self.chk_serve=QCheckBox('Serve folder via nginx:alpine'); self.chk_open_browser=QCheckBox('Open browser after start'); self.chk_incremental=QCheckBox('Incremental (-N)'); self.chk_diff=QCheckBox('Diff vs last state'); self.chk_estimate_first=QCheckBox('Estimate before clone'); self.chk_cleanup=QCheckBox('Cleanup build artifacts')
+        clone=_CollapsibleBox('Clone Options'); self._sections.append(clone); self.chk_build=QCheckBox('Build Docker image'); self.chk_run_built=QCheckBox('Run built image'); self.chk_serve=QCheckBox('Serve folder via nginx:alpine'); self.chk_open_browser=QCheckBox('Open browser after start'); self.chk_incremental=QCheckBox('Incremental (-N)'); self.chk_diff=QCheckBox('Diff vs last state'); self.chk_estimate_first=QCheckBox('Estimate before clone'); self.chk_cleanup=QCheckBox('Cleanup build artifacts')
         for w in (self.chk_build,self.chk_run_built,self.chk_serve,self.chk_open_browser,self.chk_incremental,self.chk_diff,self.chk_estimate_first,self.chk_cleanup): clone.addWidget(w)
         config_v.addWidget(clone)
         # Dynamic
-        dyn=_CollapsibleBox('Dynamic / Prerender'); self.chk_prerender=QCheckBox('Prerender (Playwright)'); self.spin_prer_pages=QSpinBox(); self.spin_prer_pages.setRange(1,2000); self.spin_prer_pages.setValue(40); self.chk_capture_api=QCheckBox('Capture API JSON'); self.hook_in=QLineEdit(); hr=QHBoxLayout(); hr.addWidget(QLabel('Hook Script:')); hr.addWidget(self.hook_in); hb=QPushButton('...'); hr.addWidget(hb); hb.clicked.connect(lambda: self._pick_file(self.hook_in)); dyn.addWidget(self.chk_prerender); dyn.addWidget(QLabel('Max Pages:')); dyn.addWidget(self.spin_prer_pages); dyn.addWidget(self.chk_capture_api); dyn.addLayout(hr); config_v.addWidget(dyn)
+        dyn=_CollapsibleBox('Dynamic / Prerender'); self._sections.append(dyn); self.chk_prerender=QCheckBox('Prerender (Playwright)'); self.spin_prer_pages=QSpinBox(); self.spin_prer_pages.setRange(1,2000); self.spin_prer_pages.setValue(40); self.chk_capture_api=QCheckBox('Capture API JSON'); self.hook_in=QLineEdit(); hr=QHBoxLayout(); hr.addWidget(QLabel('Hook Script:')); hr.addWidget(self.hook_in); hb=QPushButton('...'); hr.addWidget(hb); hb.clicked.connect(lambda: self._pick_file(self.hook_in)); dyn.addWidget(self.chk_prerender); dyn.addWidget(QLabel('Max Pages:')); dyn.addWidget(self.spin_prer_pages); dyn.addWidget(self.chk_capture_api); dyn.addLayout(hr); config_v.addWidget(dyn)
         # Router
-        router=_CollapsibleBox('Router Interception'); self.chk_router=QCheckBox('Enable Router Intercept'); self.chk_route_hash=QCheckBox('Include hash fragment (#)'); self.chk_router_quiet=QCheckBox('Quiet route logs'); self.spin_router_max=QSpinBox(); self.spin_router_max.setRange(1,10000); self.spin_router_max.setValue(200); self.spin_router_settle=QSpinBox(); self.spin_router_settle.setRange(0,10000); self.spin_router_settle.setValue(350); self.router_wait_sel=QLineEdit(); self.router_allow=QLineEdit(); self.router_deny=QLineEdit();
+        router=_CollapsibleBox('Router Interception'); self._sections.append(router); self.chk_router=QCheckBox('Enable Router Intercept'); self.chk_route_hash=QCheckBox('Include hash fragment (#)'); self.chk_router_quiet=QCheckBox('Quiet route logs'); self.spin_router_max=QSpinBox(); self.spin_router_max.setRange(1,10000); self.spin_router_max.setValue(200); self.spin_router_settle=QSpinBox(); self.spin_router_settle.setRange(0,10000); self.spin_router_settle.setValue(350); self.router_wait_sel=QLineEdit(); self.router_allow=QLineEdit(); self.router_deny=QLineEdit();
         for w in (self.chk_router,self.chk_route_hash,self.chk_router_quiet): router.addWidget(w)
         for pair in ((QLabel('Max Routes:'),self.spin_router_max),(QLabel('Settle ms:'),self.spin_router_settle),(QLabel('Wait Selector:'),self.router_wait_sel),(QLabel('Allow (regex,comma):'),self.router_allow),(QLabel('Deny (regex,comma):'),self.router_deny)):
             router.addWidget(pair[0]); router.addWidget(pair[1])
         config_v.addWidget(router)
         # Integrity
-        integ=_CollapsibleBox('Integrity & Verification'); self.chk_checksums=QCheckBox('Compute Checksums'); self.chk_verify_after=QCheckBox('Verify after clone'); self.chk_verify_deep=QCheckBox('Deep verify'); self.checksum_ext=QLineEdit(); self.checksum_ext.setPlaceholderText('extra ext: css,js,png')
+        integ=_CollapsibleBox('Integrity & Verification'); self._sections.append(integ); self.chk_checksums=QCheckBox('Compute Checksums'); self.chk_verify_after=QCheckBox('Verify after clone'); self.chk_verify_deep=QCheckBox('Deep verify'); self.checksum_ext=QLineEdit(); self.checksum_ext.setPlaceholderText('extra ext: css,js,png')
         for w in (self.chk_checksums,self.chk_verify_after,self.chk_verify_deep,self.checksum_ext): integ.addWidget(w)
         config_v.addWidget(integ)
         # Misc
-        misc=_CollapsibleBox('Misc & Performance'); self.chk_disable_js=QCheckBox('Disable JS (strip <script>)'); self.size_cap=QLineEdit(); self.size_cap.setPlaceholderText('Size cap e.g. 500M'); self.throttle=QLineEdit(); self.throttle.setPlaceholderText('Throttle e.g. 2M'); self.auth_user=QLineEdit(); self.auth_user.setPlaceholderText('Auth user'); self.auth_pass=QLineEdit(); self.auth_pass.setPlaceholderText('Auth pass'); self.cookies_file=QLineEdit(); self.cookies_file.setPlaceholderText('cookies.txt'); self.chk_import_browser_cookies=QCheckBox('Import Browser Cookies'); cr=QHBoxLayout(); cr.addWidget(self.cookies_file); cbbtn=QPushButton('...'); cr.addWidget(cbbtn); cbbtn.clicked.connect(lambda: self._pick_file(self.cookies_file)); self.plugins_dir=QLineEdit(); self.plugins_dir.setPlaceholderText('Plugins directory'); pr=QHBoxLayout(); pr.addWidget(self.plugins_dir); pbtn=QPushButton('...'); pr.addWidget(pbtn); pbtn.clicked.connect(lambda: self._pick_dir(self.plugins_dir))
+        misc=_CollapsibleBox('Misc & Performance'); self._sections.append(misc); self.chk_disable_js=QCheckBox('Disable JS (strip <script>)'); self.size_cap=QLineEdit(); self.size_cap.setPlaceholderText('Size cap e.g. 500M'); self.throttle=QLineEdit(); self.throttle.setPlaceholderText('Throttle e.g. 2M'); self.auth_user=QLineEdit(); self.auth_user.setPlaceholderText('Auth user'); self.auth_pass=QLineEdit(); self.auth_pass.setPlaceholderText('Auth pass'); self.cookies_file=QLineEdit(); self.cookies_file.setPlaceholderText('cookies.txt'); self.chk_import_browser_cookies=QCheckBox('Import Browser Cookies'); cr=QHBoxLayout(); cr.addWidget(self.cookies_file); cbbtn=QPushButton('...'); cr.addWidget(cbbtn); cbbtn.clicked.connect(lambda: self._pick_file(self.cookies_file)); self.plugins_dir=QLineEdit(); self.plugins_dir.setPlaceholderText('Plugins directory'); pr=QHBoxLayout(); pr.addWidget(self.plugins_dir); pbtn=QPushButton('...'); pr.addWidget(pbtn); pbtn.clicked.connect(lambda: self._pick_dir(self.plugins_dir))
         for w in (self.chk_disable_js,self.size_cap,self.throttle,self.auth_user,self.auth_pass,self.chk_import_browser_cookies): misc.addWidget(w)
         misc.addLayout(cr); misc.addLayout(pr); config_v.addWidget(misc)
         config_v.addStretch(1)
         # Right panel
         right=QWidget(); rv=QVBoxLayout(right); rv.setContentsMargins(4,4,4,4); rv.setSpacing(6)
-        act=QHBoxLayout(); self.btn_clone=QPushButton('Start Clone'); act.addWidget(self.btn_clone); self.btn_estimate=QPushButton('Estimate'); act.addWidget(self.btn_estimate); self.btn_pause=QPushButton('Pause'); self.btn_pause.setEnabled(False); act.addWidget(self.btn_pause); self.btn_cancel=QPushButton('Cancel'); self.btn_cancel.setEnabled(False); act.addWidget(self.btn_cancel); self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); act.addWidget(self.btn_run_docker); self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); act.addWidget(self.btn_serve); self.btn_deps=QPushButton('Dependencies'); act.addWidget(self.btn_deps); rv.addLayout(act)
+        # Button rows (compact organization):
+        # Row 1: Core run controls
+        # Row 2: Post-clone / auxiliary actions
+        row1=QHBoxLayout(); row1.setSpacing(6)
+        self.btn_clone=QPushButton('Clone'); row1.addWidget(self.btn_clone)
+        self.btn_estimate=QPushButton('Estimate'); row1.addWidget(self.btn_estimate)
+        self.btn_pause=QPushButton('Pause'); self.btn_pause.setEnabled(False); row1.addWidget(self.btn_pause)
+        self.btn_cancel=QPushButton('Cancel'); self.btn_cancel.setEnabled(False); row1.addWidget(self.btn_cancel)
+        row1.addStretch(1)
+        row2=QHBoxLayout(); row2.setSpacing(6)
+        self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
+        self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); row2.addWidget(self.btn_serve)
+        self.btn_deps=QPushButton('Dependencies'); row2.addWidget(self.btn_deps)
+        row2.addStretch(1)
+        rv.addLayout(row1); rv.addLayout(row2)
         self.prog=QProgressBar(); self.prog.setRange(0,100); rv.addWidget(self.prog)
         self.console=QTextEdit(); self.console.setReadOnly(True); rv.addWidget(self.console,1)
-        self.splitter.addWidget(scroll); self.splitter.addWidget(right); self.splitter.setStretchFactor(0,0); self.splitter.setStretchFactor(1,1)
+        self.splitter.addWidget(right); self.splitter.setStretchFactor(0,0); self.splitter.setStretchFactor(1,1)
         # Connections
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self._load_history()
         bar=QHBoxLayout(); bar.setSpacing(12); self.status_lbl=QLabel('Ready.'); self.metric_lbl=QLabel(''); self.phase_time_lbl=QLabel(''); bar.addWidget(self.status_lbl,1); bar.addWidget(self.metric_lbl,2); bar.addWidget(self.phase_time_lbl,2); root.addLayout(bar)
+        self._compute_and_lock_min_size()
 
     # Helpers
     def _browse_dest(self):
@@ -256,26 +302,119 @@ class DockerClonerGUI(QWidget):
         except Exception as e:
             self._on_log(f'[gui] docker run failed: {e}')
     def _serve_folder(self):
-        if not self._last_result or not getattr(self._last_result,'output_folder',None): return
-        folder=self._last_result.output_folder
-        try:
-            import threading, http.server, socketserver
-            ip=self.ip_in.text().strip() or '127.0.0.1'; port=self.host_port.value()
-            class _Handler(http.server.SimpleHTTPRequestHandler):
-                def __init__(self,*a,**k): os.chdir(folder); super().__init__(*a,**k)
-            def _run():
-                with socketserver.TCPServer((ip, port), _Handler) as httpd:
-                    self._on_log(f'[serve] http://{ip}:{port} -> {folder}')
-                    try: httpd.serve_forever()
-                    except Exception: pass
-            threading.Thread(target=_run,daemon=True).start()
-        except Exception as e:
-            self._on_log(f'[serve] failed: {e}')
+        # Toggle behavior: start if not running, else stop
+        if self._serve_httpd is None:
+            if not self._last_result or not getattr(self._last_result,'output_folder',None): return
+            folder=self._last_result.output_folder
+            try:
+                import threading, http.server, socketserver
+                ip=self.ip_in.text().strip() or '127.0.0.1'; port=self.host_port.value()
+                class _Handler(http.server.SimpleHTTPRequestHandler):
+                    def __init__(self,*a,**k): os.chdir(folder); super().__init__(*a,**k)
+                def _run():
+                    try:
+                        with socketserver.TCPServer((ip, port), _Handler) as httpd:
+                            self._serve_httpd=httpd
+                            self._on_log(f'[serve] http://{ip}:{port} -> {folder}')
+                            try:
+                                from PySide6.QtWidgets import QMessageBox
+                                QMessageBox.information(self,'Serve Started',f'Serving {folder}\nhttp://{ip}:{port}')
+                            except Exception: pass
+                            httpd.serve_forever()
+                    except Exception as e:
+                        self._on_log(f'[serve] failed: {e}')
+                    finally:
+                        self._serve_httpd=None; self._serve_thread=None
+                        try:
+                            from PySide6.QtWidgets import QMessageBox
+                            QMessageBox.information(self,'Serve Stopped','Folder serving stopped.')
+                        except Exception: pass
+                self._serve_thread=threading.Thread(target=_run,daemon=True); self._serve_thread.start(); self.btn_serve.setText('Stop Serve')
+            except Exception as e:
+                self._on_log(f'[serve] failed: {e}')
+        else:
+            try:
+                self._serve_httpd.shutdown()
+            except Exception:
+                pass
+            self._serve_httpd=None
+            self._on_log('[serve] shutdown requested')
+            self.btn_serve.setText('Serve Folder')
 
     def _set_running(self,running:bool):
         self.btn_clone.setEnabled(not running); self.btn_cancel.setEnabled(running); self.btn_estimate.setEnabled(not running); self.btn_pause.setEnabled(running)
         for w in (self.chk_build,self.chk_run_built,self.chk_serve,self.chk_open_browser,self.chk_prerender): w.setEnabled(not running)
         if running: self.btn_run_docker.setEnabled(False); self.btn_serve.setEnabled(False)
+
+    def _compute_and_lock_min_size(self):
+        # Expand all to measure widest required width
+        states=[box._toggle.isChecked() for box in self._sections]
+        for box in self._sections:
+            if not box._toggle.isChecked():
+                box._toggle.setChecked(True); box._on_toggled()
+        QApplication.processEvents()
+        # Measure underlying content width, not the scroll area compressed size
+        content_w=self._config_container.sizeHint().width()
+        # Add some padding + scrollbar reserve
+        pad=24
+        left_needed=content_w+pad
+        # Measure right side size hint after it has laid out
+        right_hint=self.splitter.widget(1).sizeHint()
+        right_w=right_hint.width()
+        right_h=right_hint.height()
+        # Compute full window width and target height (but allow height flexibility)
+        total_w=left_needed+right_w+40
+        content_h=max(self._config_container.sizeHint().height(), right_h)+120
+        # Cap height to available screen (leave margin) so window doesn't go off-screen
+        screen=QApplication.primaryScreen(); avail_h=screen.availableGeometry().height() if screen else 1000
+        cap_h=min(content_h, max(600, avail_h-120))
+        # Establish a global MINIMUM width but allow user to expand window to the right.
+        # Left panel width is fixed (min==max) so resizing only affects the right pane / console.
+        self.setMinimumWidth(total_w)
+        self.setMinimumHeight(min(600, cap_h))
+        # Resize to capped height if current greater
+        self.resize(total_w, cap_h)
+        # Set left fixed width so center position stays constant
+        self.splitter.widget(0).setMinimumWidth(left_needed)
+        self.splitter.widget(0).setMaximumWidth(left_needed)
+        # Ensure splitter allocates sizes explicitly
+        self.splitter.setSizes([left_needed, right_w])
+        # Restore previous collapse states
+        for st,box in zip(states,self._sections):
+            if not st:
+                box._toggle.setChecked(False); box._on_toggled()
+
+    def showEvent(self, ev):  # ensure fixation after initial layout on different DPI
+        super().showEvent(ev)
+        if not getattr(self,'_fixed_sized',False):
+            try:
+                self._compute_and_lock_min_size()
+            except Exception:
+                pass
+            self._fixed_sized=True
+        # Initialize anchor after first show when final position is known
+        if self._anchor_left is None:
+            self._anchor_left=self.x()
+            self._last_size=self.size()
+
+    def resizeEvent(self, ev):
+        prev_size=self._last_size
+        super().resizeEvent(ev)
+        # Enforce left edge anchor: if width changed and x shifted, move back
+        if self._anchor_left is None:
+            self._anchor_left=self.x()
+        if prev_size and (self.width()!=prev_size.width()):
+            if self.x()!=self._anchor_left:
+                # Keep top-left anchored, effectively making right edge the resize handle
+                self.move(self._anchor_left, self.y())
+        self._last_size=self.size()
+
+    def moveEvent(self, ev):
+        # Allow normal moves (user dragging window) when size not changing
+        # Update anchor to new x so future resizes still grow/shrink from right edge relative to new position.
+        if self._last_size and self.size()==self._last_size:
+            self._anchor_left=self.x()
+        super().moveEvent(ev)
 
     def _history_path(self): return os.path.join(os.path.expanduser('~'),'.cw2dt_history.json')
     def _load_history(self):
@@ -459,7 +598,23 @@ class DockerClonerGUI(QWidget):
         overall=int(round(tot*100)); self.prog.setValue(overall); self.status_lbl.setText(f"{phase}: {pct}% (overall {overall}%)")
 
 def launch():
-    app=QApplication(sys.argv); w=DockerClonerGUI(); w.resize(1000,760); w.show(); sys.exit(app.exec())
+    app=QApplication(sys.argv)
+    # Set application-wide icon so macOS Dock / task switcher uses icon.png
+    try:
+        base=os.path.join(os.path.dirname(__file__),'images')
+        tried=False
+        ip=os.path.join(base,'icon.png')
+        if os.path.exists(ip):
+            app.setWindowIcon(QIcon(ip)); tried=True
+        if not tried:
+            root_dir=os.path.dirname(__file__)
+            for ic in ('icon.icns','icon.ico','icon.png'):
+                root_icon=os.path.join(root_dir,ic)
+                if os.path.exists(root_icon):
+                    app.setWindowIcon(QIcon(root_icon)); break
+    except Exception:
+        pass
+    w=DockerClonerGUI(); w.resize(1000,760); w.show(); sys.exit(app.exec())
 
 if __name__=='__main__':  # pragma: no cover
     launch()

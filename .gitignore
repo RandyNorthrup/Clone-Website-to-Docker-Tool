@@ -4,11 +4,18 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 .env
 .env/
 .venv/
 venv/
 ENV/
+env/
 
 # VS Code
 .vscode/
@@ -20,16 +27,37 @@ ENV/
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
 
 # Logs
 *.log
+logs/
 
 # Misc
 *.bak
 *.swp
 *.tmp
+*.orig
+*.rej
+*.snap
+
+# Packaging / distribution
+dist/
+build/
+*.egg-info/
+*.egg
+wheelhouse/
 
 # PyInstaller build artifacts
 build/
 dist/
 *.spec
+
+# Local runtime outputs
+output/
+out/
+tmp/
+temp/
+__dist_cache__/
