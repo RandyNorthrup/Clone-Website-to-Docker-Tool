@@ -1,44 +1,38 @@
 # Clone Website to Docker Tool
 
-A desktop utility that clones any public website to a local folder using `wget`, then packages and serves it with Docker + Nginx. It supports one-click build/run, serving directly from a folder (no build), **custom bind IP**, **host/target port mapping**, and a modern dark UI.
+A desktop utility to clone any public website to a local folder using **wget2** (parallel, resumable), then package and serve it with Docker + Nginx. Supports one-click build/run, folder serving (no build), custom bind IP, port mapping, cookie import, and a modern dark UI. Also includes a full-featured headless CLI for automation.
 
 ---
 
 ## ✨ Features
 
-- **Point-and-click cloning** with `wget --mirror` (link conversion, assets, no-parent).
-- **Self-contained output** in the directory you select: Dockerfile, optional `nginx.conf`, and a README per project.
-- **Build image** (optional). On success, inputs are cleaned so only the README remains in the project dir.
-- **Two run modes**
-  - **Run Created Container** (built image).
-  - **Serve From Folder (no build)** via bind-mount + a minimal Nginx config.
-- **Networking controls**
-  - **Bind IP** (e.g., `127.0.0.1`, `0.0.0.0`, or your LAN IP).
-  - **Host Port** (left side of `-p`).
-  - **Container Port** (right side of `-p`).
-- **Safety & ergonomics**
-  - Detects “port in use” and offers an alternative.
-  - Disables “Clone & Prepare” while a container launched by the app is running.
-  - Live status pill with uptime, port mapping, and project path.
-  - “Copy URL” & “Open in Browser” buttons.
-- **Advanced options** (toggle)
-  - Download size quota and rate throttling for `wget`.
-- **Modern dark UI** with rounded corners/shadows, and a centered icon header (web ➜ arrow ➜ docker).
+- **Point-and-click cloning** with `wget2 --mirror` (parallel, resumable, link conversion, assets, no-parent)
+- **Self-contained output**: Dockerfile, nginx.conf, README per project
+- **Build Docker image** (optional) and clean up inputs after success
+- **Serve From Folder (no build)**: bind-mount + minimal Nginx config
+- **Networking controls**: Bind IP, Host Port, Container Port
+- **Cookie import**: Scan browser cookies for authenticated downloads
+- **Advanced options**: Download quota, rate throttling, parallel jobs, JS disabling
+- **Headless CLI**: Full-featured command-line mode for automation
+- **Live status**: Uptime, port mapping, project path, auto-refresh
+- **Safety**: Detects port in use, disables actions while running, auto-enables buttons
+- **Modern dark UI**: Rounded corners, icon header, responsive layout
 
 ---
 
 ## 📦 Requirements
 
-- **Python** 3.9+  
-- **PySide6** (`pip install PySide6`)
-- **wget** on PATH  
-  - macOS: `brew install wget`  
-  - Windows: https://eternallybored.org/misc/wget/ (add to PATH)  
-  - Linux (Debian/Ubuntu): `sudo apt-get install -y wget`
+- **Python** 3.9+
+- **PySide6** (`pip install PySide6`) for GUI
+- **wget2** (not wget) on PATH
+  - macOS: `brew install wget2`
+  - Linux: `sudo apt-get install -y wget2` (Debian/Ubuntu) or use your distro's package manager
+  - Windows: Use MSYS2 (`pacman -S mingw-w64-ucrt-x86_64-wget2`) or build from source
 - **Docker** (optional, required to build/run)
   - macOS: `brew install --cask docker`
   - Windows: `winget install Docker.DockerDesktop`
   - Linux: `sudo apt-get install -y docker.io` (or distro equivalent)
+- **browser_cookie3** (`pip install browser_cookie3`) for cookie import (optional, CLI and GUI)
 
 > The app will still **clone** without Docker installed. Run buttons are disabled until Docker is available.
 
@@ -46,53 +40,44 @@ A desktop utility that clones any public website to a local folder using `wget`,
 
 ## 🚀 Quick Start
 
-1. **Install deps**
+1. **Install dependencies**
    ```bash
-   pip install PySide6
+   pip install PySide6 browser_cookie3
+   # Install wget2 and Docker as above
    ```
-   Ensure `wget` and Docker are installed (see above).
-
 2. **Run the app**
    ```bash
-   python path/to/cw2dt.py
+   python cw2dt.py
    ```
-
 3. **Prepare a project**
-   - Enter **Website URL**.
-   - Choose **Destination Folder**.
-   - (Optional) check **Build Docker image after clone** and set **Docker Image Name**.
-   - (Optional) open **Advanced Options** for quota/throttle.
-   - In **Run** section, set **Bind IP**, **Host Port**, and **Container Port**.
-   - Click **Clone  Prepare**.
-
-4. **Serve it**
-   - **Run Created Container** (uses the built image), or
-   - **Serve From Folder (no build)** (bind-mounts your folder into `nginx:alpine`).
-   - Use **Open in Browser** or **Copy URL**.
-
+   - Enter Website URL
+   - Choose Destination Folder
+   - (Optional) Build Docker image and set image name
+   - (Optional) Advanced: quota, throttle, parallel jobs, JS disable, cookie import
+   - Set Bind IP, Host Port, Container Port
+   - Click **Clone  Prepare**
+4. **Serve**
+   - **Run Created Container** (built image)
+   - **Serve From Folder (no build)** (bind-mounts folder into nginx:alpine)
+   - Use **Open in Browser** or **Copy URL**
 5. **Stop**
-   - Click **Stop Container** to stop the container that was started from this GUI.
+   - Click **Stop Container**
 
 ---
 
-## 🧭 UI Tour
+## 🧭 UI & CLI Tour
 
-- **Source**: Website URL and Destination folder.  
-- **Build**: Enable image build and set **Docker Image Name**. Toggle **Advanced Options** to limit mirror size or throttle rate.  
-- **Run**:  
-  - **Bind IP** (e.g., `127.0.0.1` for local only, `0.0.0.0` for all interfaces, or your LAN IP).  
-  - **Host Port** (**external** port your browser uses).  
-  - **Container Port** (**internal** Nginx port—reflected in the Dockerfile/`nginx.conf` for built images).  
-  - **Run Created Container** uses `-p <bind_ip>:<host_port>:<container_port> <image>`.  
-  - **Serve From Folder** creates a tiny Nginx conf that listens on your chosen **container port** and bind-mounts it along with the site folder.
-
-- **Status bar**: Live 3-second refresh. Shows mode, mapping (`host_ip:host_port → container:container_port`), uptime, and project path.
-
-- **Buttons auto-enable/disable** based on state (Docker availability, running container, prepared folder, local image presence).
+- **Source**: Website URL, Destination folder
+- **Build**: Enable image build, set Docker image name, quota/throttle, parallel jobs, JS disable
+- **Run**: Bind IP, Host Port, Container Port
+- **Cookie Import**: Scan browser cookies for authenticated downloads
+- **Status bar**: Live refresh, mode, mapping, uptime, project path
+- **Buttons**: Auto-enable/disable based on state
+- **CLI**: All features available via `--headless` mode (see below)
 
 ---
 
-## 🗂️ Output Layout (after “Clone  Prepare”)
+## 🗂️ Output Layout
 
 ```
 <Destination>/<project_name>/
@@ -100,90 +85,82 @@ A desktop utility that clones any public website to a local folder using `wget`,
   nginx.conf                # listen <container_port>
   <website content>         # mirrored files (removed after successful build)
   README_<project>.md       # per-project usage notes (always regenerated last)
-  .folder.default.<port>.conf  # created on demand for "Serve From Folder"
+  imported_cookies.txt      # if cookies imported
+  .folder.default.<port>.conf  # for "Serve From Folder"
 ```
 
-> If the image **build succeeds**, the tool cleans up all inputs (site files, Dockerfile, nginx.conf) and leaves only the README (so the folder is just documentation). “Serve From Folder” requires a prepared folder; build cleanup means you’ll need to re-prepare if you want to run folder mode again.
+> After a successful build, the tool cleans up inputs and leaves only the README. To serve from folder again, re-prepare the project.
 
 ---
 
-## 🔧 How It Works (high level)
+## 🔧 How It Works
 
-1. **CloneThread (QThread)** runs `wget` mirroring with optional `--quota` and `--limit-rate`.  
-2. Detects **site root** (first folder containing an index file).  
-3. Writes a **Dockerfile** and **nginx.conf** tuned to your **Container Port**.  
-4. **Build** (optional). On success, cleans inputs and leaves README.  
-5. **Run** uses `docker run` with `-p <bind_ip>:<host_port>:<container_port>`.  
-   - **Folder mode** mounts the folder and a one-file Nginx config to listen on your chosen **Container Port**.
+1. Clone with `wget2` (parallel, resumable, quota/throttle, cookies, JS disable)
+2. Detect site root (first folder with index file)
+3. Write Dockerfile and nginx.conf for chosen container port
+4. Build Docker image (optional)
+5. Run container: `docker run -p <bind_ip>:<host_port>:<container_port> <image>`
+6. Serve from folder: bind-mount folder and config into nginx:alpine
 
 ---
 
 ## 🔒 Legal & Ethics
 
-- The tool sets `-e robots=off` and `--mirror`. **Only clone content you have the right to copy** and **respect site Terms of Service**, copyright, and robots policies when applicable.  
-- Avoid cloning authenticated, rate-limited, or copyrighted resources without permission.  
+- The tool sets `-e robots=off` and `--mirror`. **Only clone content you have the right to copy** and **respect site Terms of Service**, copyright, and robots.txt when applicable.
+- Avoid cloning authenticated, rate-limited, or copyrighted resources without permission.
 - You are responsible for how you use this tool.
 
 ---
 
 ## 🧪 Common Workflows
 
-### Build & run a local, portable image
-1. Enter URL, dest folder, check **Build Docker image after clone**, set an image name.
-2. Clone & build.
-3. Click **Run Created Container**.
+### Build & run a portable image
+1. Enter URL, destination folder, enable build, set image name
+2. Clone & build
+3. Run Created Container
 
 ### Quick local preview (no build)
-1. Clone (build unchecked).
-2. Click **Serve From Folder (no build)**.  
-3. Stop when finished.
+1. Clone (build unchecked)
+2. Serve From Folder (no build)
+3. Stop when finished
+
+### Authenticated clone
+- Scan browser cookies, enable "Use imported cookies"
+- Clone site with authentication
 
 ### Expose to LAN
-- Set **Bind IP** to your machine’s LAN IP (click **Detect LAN IP**).  
-- Choose **Host Port** that’s open on your firewall/router.  
-- Anyone on your LAN can visit `http://<LAN_IP>:<Host Port>`.
+- Set Bind IP to your LAN IP (Detect LAN IP)
+- Choose Host Port open on your firewall/router
+- LAN users visit `http://<LAN_IP>:<Host Port>`
 
 ---
 
 ## 🆘 Troubleshooting
 
-- **Docker not found**  
-  Buttons are disabled. Install Docker (see Requirements) and reopen the app.
-
-- **Permission denied (Linux)**  
-  Add your user to the `docker` group and re-login:
+- **wget2 not found**: Install via your OS package manager (see Requirements)
+- **Docker not found**: Buttons disabled. Install Docker and reopen the app
+- **Permission denied (Linux)**: Add your user to the `docker` group and re-login:
   ```bash
   sudo usermod -aG docker $USER
   ```
-
-- **Port already in use**  
-  The app will prompt for another port. You can also change **Bind IP** to isolate to localhost.
-
-- **Cloning fails or is partial**  
-  Some sites rely on dynamic backends; a static mirror may not work fully. Consider a different mirroring strategy if needed.
-
-- **Slow or huge downloads**  
-  Use **Advanced Options**: set a size quota and/or throttle rate.
-
-- **“Open in Browser” does nothing**  
-  Ensure a container is running and no firewall blocks the chosen **Host Port**. If **Bind IP** is `0.0.0.0`, the app uses `localhost` for the URL.
-
-- **Icons not visible**  
-  Place `web_logo.png`, `arrow_right.png`, and `docker_logo.png` in `./images/` (next to the script). The app also searches the script dir and current working dir.
+- **Port already in use**: App prompts for another port, or change Bind IP
+- **Cloning fails/partial**: Some sites need dynamic backends; static mirror may not work fully
+- **Slow/huge downloads**: Use Advanced Options (quota/throttle)
+- **Open in Browser does nothing**: Ensure container is running, firewall allows Host Port
+- **Icons not visible**: Place `web_logo.png`, `arrow_right.png`, `docker_logo.png` in `./images/` or script dir
+- **Cookie import fails**: Ensure `browser_cookie3` is installed and browser profile is accessible
 
 ---
 
 ## 🛠️ Building a Standalone App (optional)
 
 Use PyInstaller:
-
 ```bash
 pip install pyinstaller
 pyinstaller -y --noconfirm --windowed --name "Clone Website to Docker Tool" cw2dt.py
 ```
-
-- Add `--icon path/to/your_app_icon.ico/icns` if you’ve created one.
-- Bundle `images/` alongside the executable.
+- Add `--icon path/to/icon.ico/icns` if you have one
+- Bundle `images/` alongside the executable
 
 ---
 
@@ -200,29 +177,28 @@ pyinstaller -y --noconfirm --windowed --name "Clone Website to Docker Tool" cw2d
     -v "<conf>.conf":/etc/nginx/conf.d/default.conf:ro \
     nginx:alpine
   ```
+- **Windows PowerShell**: Use double quotes for paths and backticks for line continuation
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-
+MIT License. See [LICENSE](LICENSE).
 
 ---
 
-## 🗺️ Roadmap (ideas)
+## 🗺️ Roadmap
 
-- Optional auth for private sites (cookies/session export).  
-- Parallel fetch or alternate crawlers.  
-- Built-in bandwidth monitor and detailed progress.  
-- Light theme toggle.
+- Optional auth for private sites (cookies/session export)
+- Parallel fetch or alternate crawlers
+- Built-in bandwidth monitor and progress
+- Light theme toggle
 
 ---
 
 ### Credits
 
-- **Nginx** (Alpine), **Docker**, **wget**, **PySide6**.  
+- **Nginx** (Alpine), **Docker**, **wget2**, **PySide6**, **browser_cookie3**
 
 ---
 
