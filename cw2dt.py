@@ -106,6 +106,52 @@ def run_verification(manifest_path: str, fast: bool=True, docker_name: str|None=
             pass
     return passed, stats
 
+# ---- checksum helper (shared headless + GUI thread) ----
+def compute_checksums(base_folder: str, extra_extensions: list[str] | None = None, progress_cb=None, chunk_size: int = 65536):
+    """Compute SHA256 checksums for HTML/HTM, API JSON under _api/, and optional extra extensions.
+    Returns mapping {relative_path: sha256hex}.
+    progress_cb (optional) called as progress_cb(processed, total) for coarse progress.
+    """
+    import hashlib, os as _os, time as _t
+    extra_ext = [e.lower().lstrip('.') for e in (extra_extensions or []) if e]
+    extra_ext_tuple = tuple(f".{e}" if not e.startswith('.') else e for e in extra_ext)
+    candidates = []
+    norm_api = '/_api/'
+    start_time = _t.time()
+    for root, _, files in _os.walk(base_folder):
+        norm_root = root.replace('\\','/')
+        is_api_dir = (norm_api in (norm_root + '/'))  # cheap contains check
+        for fn in files:
+            low = fn.lower()
+            cond_html = low.endswith(('.html', '.htm'))
+            cond_api = is_api_dir and low.endswith('.json')
+            cond_extra = extra_ext_tuple and low.endswith(extra_ext_tuple)
+            if cond_html or cond_api or cond_extra:
+                candidates.append((root, fn))
+    total = len(candidates)
+    checks = {}
+    last_emit = 0.0
+    for idx, (root, fn) in enumerate(candidates, 1):
+        p = _os.path.join(root, fn)
+        rel = _os.path.relpath(p, base_folder)
+        try:
+            h = hashlib.sha256()
+            with open(p, 'rb') as cf:
+                for chunk in iter(lambda: cf.read(chunk_size), b''):
+                    h.update(chunk)
+            checks[rel] = h.hexdigest()
+        except Exception:
+            continue
+        if progress_cb:
+            now = _t.time()
+            if idx == 1 or idx == total or (idx % 50 == 0) or (now - last_emit) > 0.6:
+                last_emit = now
+                try:
+                    progress_cb(idx, total)
+                except Exception:
+                    pass
+    return checks
+
 # Reintroduce basic helpers (some code below references these)
 def is_wget2_available():
     try:
@@ -630,33 +676,9 @@ def headless_main(argv: list[str]) -> int:
                 'checksum_extra_extensions': extra_ext_list,
             }
             if args.checksums:
-                candidates = []
-                extra_ext_tuple = tuple(f".{e}" if not e.startswith('.') else e for e in extra_ext_list)
-                for root, _, files in os.walk(output_folder):
-                    for fn in files:
-                        low = fn.lower()
-                        is_api = ('/_api/' in root.replace('\\','/')) or ('/_api' in root.replace('\\','/'))
-                        cond_html = low.endswith(('.html', '.htm'))
-                        cond_api = is_api and low.endswith('.json')
-                        cond_extra = extra_ext_tuple and low.endswith(extra_ext_tuple)
-                        if cond_html or cond_api or cond_extra:
-                            candidates.append((root, fn))
-                total = len(candidates)
-                checks = {}
-                for idx, (root, fn) in enumerate(candidates, 1):
-                    p = os.path.join(root, fn)
-                    rel = os.path.relpath(p, output_folder)
-                    try:
-                        h = hashlib.sha256()
-                        with open(p, 'rb') as cf:
-                            for chunk in iter(lambda: cf.read(65536), b''):
-                                h.update(chunk)
-                        checks[rel] = h.hexdigest()
-                    except Exception:
-                        continue
-                    if idx == 1 or idx == total or idx % 50 == 0:
-                        print(f"[checksums] {idx}/{total} ({int(idx*100/total)}%)")
-                manifest['checksums_sha256'] = checks
+                def _headless_progress(processed, total):
+                    print(f"[checksums] {processed}/{total} ({int(processed*100/total)}%)")
+                manifest['checksums_sha256'] = compute_checksums(output_folder, extra_ext_list, progress_cb=_headless_progress)
             manifest_path = os.path.join(output_folder, 'clone_manifest.json')
             with open(manifest_path, 'w', encoding='utf-8') as mf:
                 json.dump(manifest, mf, indent=2)
@@ -863,64 +885,13 @@ if __name__ == '__main__':
         sys.exit(headless_main(argv))
 
 # After headless early-exit, import Qt for GUI definitions below
-if not CW2DT_NO_QT:
-    from PySide6.QtWidgets import (
-        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
-        QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
-        QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
-    )
-    from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
-    from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
-else:
-    # Minimal stubs for non-GUI test import context
-    class QWidget: ...
-    class QThread: ...
-    class Signal:
-        def __init__(self,*a,**k): pass
-        def connect(self,*a,**k): pass
-        def emit(self,*a,**k): pass
-    class QTimer: ...
-    class QSettings: ...
-    class QApplication: ...
-    class QLabel: ...
-    class QVBoxLayout: ...
-    class QHBoxLayout: ...
-    class QGridLayout: ...
-    class QLineEdit: ...
-    class QPushButton: ...
-    class QFileDialog: ...
-    class QTextEdit: ...
-    class QCheckBox: ...
-    class QComboBox: ...
-    class QSpinBox: ...
-    class QInputDialog: ...
-    class QFrame: ...
-    class QSizePolicy: ...
-    class QMessageBox: ...
-    class QScrollArea: ...
-    class QLayout: ...
-    class QDialog: ...
-    class QProgressBar: ...
-    class QSplitter: ...
-    class QSplitterHandle: ...
-    class QGuiApplication:
-        @staticmethod
-        def clipboard():
-            class _C:
-                def setText(self,*a,**k): pass
-            return _C()
-        @staticmethod
-        def primaryScreen(): return None
-    class QFontMetrics: ...
-    class QPixmap: ...
-    class QIcon: ...
-    class Qt:
-        class AspectRatioMode: KeepAspectRatio=0
-        class TransformationMode: SmoothTransformation=0
-        class AlignmentFlag: AlignCenter=0
-        class WidgetAttribute: WA_StyledBackground=0
-        class Orientation: Horizontal=0
-        class CursorShape: PointingHandCursor=0
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
+    QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
+    QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
+)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
+from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
 
 def image_exists_locally(image_name: str) -> bool:
     if not image_name:
@@ -1608,49 +1579,23 @@ class CloneThread(QThread):
                 # Optionally compute checksums (HTML + API JSON + extra ext)
                 if self.checksums:
                     emit_total("checksums", 0)
-                    import hashlib, time as _t
-                    candidates = []
-                    extra_ext = tuple(f".{e}" if not e.startswith('.') else e for e in self.checksum_extra_ext)
-                    for root, _, files in os.walk(output_folder):
-                        for fn in files:
-                            low = fn.lower()
-                            is_api = ('/_api/' in root.replace('\\','/')) or ('/_api' in root.replace('\\','/'))
-                            cond_html = low.endswith(('.html', '.htm'))
-                            cond_api = is_api and low.endswith('.json')
-                            cond_extra = extra_ext and low.endswith(extra_ext)
-                            if cond_html or cond_api or cond_extra:
-                                candidates.append((root, fn))
-                    total = len(candidates)
-                    checks = {}
-                    last_emit = 0.0
-                    for idx, (root, fn) in enumerate(candidates, 1):
-                        p = os.path.join(root, fn)
-                        rel = os.path.relpath(p, output_folder)
+                    def _gui_progress(processed, total):
+                        pct = int(processed * 100 / total) if total else 100
                         try:
-                            h = hashlib.sha256()
-                            with open(p, 'rb') as cf:
-                                for chunk in iter(lambda: cf.read(65536), b''):
-                                    h.update(chunk)
-                            checks[rel] = h.hexdigest()
-                        except Exception:
-                            continue
-                        now = _t.time()
-                        pct = int(idx * 100 / total) if total else 100
-                        if idx == 1 or idx == total or (now - last_emit) > 0.6 or (idx % 50 == 0):
-                            last_emit = now
-                            try:
-                                self.progress.emit(f"Checksums: {idx}/{total} ({pct}%)")
-                            except Exception:
-                                pass
-                            try:
-                                self.checksum_progress.emit(pct)
-                            except Exception:
-                                pass
+                            self.progress.emit(f"Checksums: {processed}/{total} ({pct}%)")
+                        except Exception: pass
+                        try:
+                            self.checksum_progress.emit(pct)
+                        except Exception: pass
                         emit_total("checksums", pct)
+                    checks = compute_checksums(output_folder, self.checksum_extra_ext, progress_cb=_gui_progress)
                     manifest['checksums_sha256'] = checks
                     if self.checksum_extra_ext:
                         manifest['checksum_extra_extensions'] = self.checksum_extra_ext
-                    self.progress.emit("Checksums complete (100%).")
+                    try:
+                        self.progress.emit("Checksums complete (100%).")
+                    except Exception:
+                        pass
                 # Phase timing summary (seconds)
                 if self._phase_start_time:
                     import math
