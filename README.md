@@ -178,6 +178,11 @@ Other:
 - `--no-manifest` Skip writing clone_manifest.json and project README summary augmentation
 - `--checksums` Generate SHA256 checksums for cloned HTML/HTM and captured API JSON files (writes into manifest). Note: adds I/O time proportional to file count.
 - `--checksum-ext EXT1,EXT2` Additional file extensions to include in checksums (e.g. css,js,png); improves integrity coverage at extra cost.
+- `--verify-after` Run checksum verification immediately after clone (fast mode by default; skips missing files instead of failing).
+- `--verify-deep` Use with `--verify-after` for a deep verification (do not skip missing; missing or mismatched files will fail).
+- `--verify-fast` Alias for `--verify-after` (fast mode).
+- `--verify-checksums` (Deprecated) Legacy alias retained for backward compatibility (acts like `--verify-after`).
+- `--selftest-verification` Internal developer self-test for checksum summary parsing (does not perform a clone).
 
 Noise Reduction Tip:
 
@@ -205,6 +210,7 @@ This limits traversal to matching routes while hiding the individual enqueue log
 
 If `--checksums` is enabled, SHA256 hashes are embedded in `clone_manifest.json` under a `checksums` object mapping relative paths to their digest. This is useful for integrity verification, diffing between runs, or external audit pipelines. The checksum phase runs after cloning (and prerender if enabled) and reports progress in the GUI console (or periodic updates headless). To re-verify later you can script a simple walker comparing stored digests to freshly computed ones.
 If extra extensions were provided via `--checksum-ext`, they appear in the manifest under `checksum_extra_extensions`.
+If verification is requested (`--verify-after` / GUI "Verify after clone"), the tool invokes an internal verifier that recomputes and compares digests, appending a summary (status + counts) to both the manifest and project README. Fast mode (default) ignores missing files; deep mode flags them.
 ```
 
 ## Dynamic Rendering (Prerender) Details

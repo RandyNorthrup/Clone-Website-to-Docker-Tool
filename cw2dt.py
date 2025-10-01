@@ -93,7 +93,6 @@ def is_wget2_available():
     except Exception:
         return False
 
-PARTIAL_SUFFIXES = {".tmp", ".part", ".partial", ".download"}
 def count_files_and_partials(base_path: str):
     total=0; partials=0
     if not base_path or not os.path.isdir(base_path):
