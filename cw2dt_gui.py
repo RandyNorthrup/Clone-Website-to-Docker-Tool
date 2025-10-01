@@ -47,6 +47,7 @@ class _CloneWorker(QThread):
 
 class _CollapsibleBox(QWidget):
     """Collapsible section with header spanning width."""
+    toggled = Signal(bool)
     def __init__(self, title: str):
         super().__init__()
         self._toggle = QToolButton(); self._toggle.setText(title); self._toggle.setCheckable(True); self._toggle.setChecked(False)
@@ -63,7 +64,7 @@ class _CollapsibleBox(QWidget):
     def addWidget(self,w): self._content_lay.addWidget(w)
     def addLayout(self,l): self._content_lay.addLayout(l)
     def _on_toggled(self):
-        o=self._toggle.isChecked(); self._toggle.setArrowType(Qt.ArrowType.DownArrow if o else Qt.ArrowType.RightArrow); self._content.setVisible(o)
+        o=self._toggle.isChecked(); self._toggle.setArrowType(Qt.ArrowType.DownArrow if o else Qt.ArrowType.RightArrow); self._content.setVisible(o); self.toggled.emit(o)
 
 class DockerClonerGUI(QWidget):
     sig_log=Signal(str); sig_phase=Signal(str,int); sig_bandwidth=Signal(str); sig_api=Signal(int); sig_router=Signal(int); sig_checksum=Signal(int)
@@ -187,12 +188,18 @@ class DockerClonerGUI(QWidget):
         self._load_history()
         bar=QHBoxLayout(); bar.setSpacing(12); self.status_lbl=QLabel('Ready.'); self.metric_lbl=QLabel(''); self.phase_time_lbl=QLabel(''); bar.addWidget(self.status_lbl,1); bar.addWidget(self.metric_lbl,2); bar.addWidget(self.phase_time_lbl,2); root.addLayout(bar)
         # Insert a slim toggle button at top of left panel (after history load) to expand/collapse all sections
-        self.btn_sections_toggle=QPushButton('Expand All')
+        self.btn_sections_toggle=QPushButton('▸ Expand All')
         self.btn_sections_toggle.setFlat(True)
         self.btn_sections_toggle.setToolTip('Toggle expanding or collapsing all configuration sections.')
         self.btn_sections_toggle.clicked.connect(self._toggle_all_sections)
         # Prepend to config layout (index 0)
         config_v.insertWidget(0, self.btn_sections_toggle)
+        # Connect individual section toggle signals to auto-refresh master toggle label
+        for box in self._sections:
+            try:
+                box.toggled.connect(self._refresh_sections_toggle_label)
+            except Exception:
+                pass
         self._compute_and_lock_min_size()
         # Apply descriptive tooltips to all interactive widgets
         self._apply_tooltips()
@@ -359,12 +366,21 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         self._after_section_bulk_change()
 
     def _after_section_bulk_change(self):
-        # Adjust toggle button text to reflect next action
+        self._refresh_sections_toggle_label(scroll_top=True)
+
+    def _refresh_sections_toggle_label(self, *_, scroll_top=False):
+        """Update the master expand/collapse toggle label with appropriate icon."""
         try:
-            any_collapsed=any(not b._toggle.isChecked() for b in self._sections)
-            if hasattr(self,'btn_sections_toggle'):
-                self.btn_sections_toggle.setText('Expand All' if any_collapsed else 'Collapse All')
-            self._config_scroll.verticalScrollBar().setValue(0)
+            if not hasattr(self,'btn_sections_toggle'): return
+            all_expanded=all(b._toggle.isChecked() for b in self._sections) if self._sections else False
+            if all_expanded:
+                self.btn_sections_toggle.setText('▾ Collapse All')
+            else:
+                # If mixture or all collapsed -> show expand
+                self.btn_sections_toggle.setText('▸ Expand All')
+            if scroll_top:
+                try: self._config_scroll.verticalScrollBar().setValue(0)
+                except Exception: pass
         except Exception:
             pass
 
