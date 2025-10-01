@@ -290,7 +290,15 @@ class DockerClonerGUI(QWidget):
                 b.setIconSize(QSize(16,16))
             except Exception:
                 pass
-        # Apply a light stylesheet only to these buttons (avoid QToolButton toggles)
+        # Assign semantic kinds for color distinction
+        if hasattr(self,'btn_clone'): self.btn_clone.setProperty('kind','primary')
+        if hasattr(self,'btn_wizard'): self.btn_wizard.setProperty('kind','accent')
+        if hasattr(self,'btn_run_docker'): self.btn_run_docker.setProperty('kind','primary')
+        if hasattr(self,'btn_cancel'): self.btn_cancel.setProperty('kind','danger')
+        # Remaining default to secondary; optionally mark explicitly
+        for name in ('btn_estimate','btn_pause','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg'):
+            if hasattr(self,name): getattr(self,name).setProperty('kind','secondary')
+        # Apply a stylesheet with variant colors
         style="""
 QPushButton {
   padding:4px 10px;
@@ -299,9 +307,24 @@ QPushButton {
   border-radius:4px;
   background:#2e2e2e;
   color:#f0f0f0;
+  transition: background 120ms ease, border-color 120ms ease;
 }
-QPushButton:hover { background:#3a3a3a; }
-QPushButton:pressed { background:#444; }
+QPushButton[kind="primary"] { background:#1e6ad6; border-color:#1e6ad6; }
+QPushButton[kind="primary"]:hover { background:#2578ef; }
+QPushButton[kind="primary"]:pressed { background:#1857a6; }
+
+QPushButton[kind="danger"] { background:#b3261e; border-color:#b3261e; }
+QPushButton[kind="danger"]:hover { background:#c63a31; }
+QPushButton[kind="danger"]:pressed { background:#8d1d17; }
+
+QPushButton[kind="accent"] { background:#1f8d49; border-color:#1f8d49; }
+QPushButton[kind="accent"]:hover { background:#25a658; }
+QPushButton[kind="accent"]:pressed { background:#146634; }
+
+QPushButton[kind="secondary"] { background:#3a3a3a; border-color:#5a5a5a; }
+QPushButton[kind="secondary"]:hover { background:#474747; }
+QPushButton[kind="secondary"]:pressed { background:#2f2f2f; }
+
 QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
 """
         # Merge with any existing stylesheet on the root widget
