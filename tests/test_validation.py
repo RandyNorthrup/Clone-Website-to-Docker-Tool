@@ -5,7 +5,7 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from cw2dt import validate_required_fields  # type: ignore
+from cw2dt_core import validate_required_fields  # type: ignore
 
 class TestValidateRequiredFields(unittest.TestCase):
     def test_all_ok_without_build(self):

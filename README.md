@@ -39,6 +39,13 @@ A desktop + CLI utility to clone public or private websites using **wget2** (par
     - Live router route discovery counter (when interception enabled)
 - **Cross-platform**: macOS, Linux, Windows
 - **Fail-soft optional features**: prerender gracefully skipped if Playwright not installed
+- **Incremental & Diff Mode (headless)**: `--incremental` uses wget2 timestamping to skip unchanged remote resources; `--diff-latest` produces a JSON diff report vs. the previous run (added/removed/modified summary)
+- **Plugin Hooks**: Drop simple `.py` files into a directory and pass `--plugins-dir` to run optional `post_asset(rel_path, bytes, ctx)` and `finalize(output_folder, manifest, ctx)` hooks (e.g., post‑processing, minification, injecting analytics)
+- **Config File Ingestion**: Supply defaults via `--config config.json|yaml` (CLI flags still override)
+- **JSON Logs**: Machine-readable event stream (`--json-logs`) for CI parsing (plugin load/asset modified events; extensible)
+- **Profiling**: `--profile` prints phase timings JSON (clone/prerender/build/checksums/total)
+- **Extended Checksums**: `--checksum-ext css,js,png` to expand integrity coverage beyond HTML + captured API JSON
+- **Manifest Timings & API Notes**: Phase durations recorded when available; if API capture enabled but none found, explanatory note differentiates "none present" vs. feature disabled
 
 ---
 
@@ -126,6 +133,27 @@ Disable JavaScript entirely after download (for offline hardening / audit):
 python cw2dt.py --headless --url https://example.com --dest ./mirror --docker-name hardened --disable-js
 ```
 
+Incremental clone + diff report (second run prints concise changes):
+
+```bash
+python cw2dt.py --headless \
+  --url https://example.com \
+  --dest ./snapshots --docker-name siteA \
+  --incremental --diff-latest --checksums --checksum-ext css,js
+```
+
+Profile clone phases (emits JSON blob at end):
+
+```bash
+python cw2dt.py --headless --url https://example.com --dest ./out --docker-name prof --profile
+```
+
+Use config file for defaults (values only overridden if CLI omits them):
+
+```bash
+python cw2dt.py --headless --config clone_defaults.json --url https://example.com --dest ./out --docker-name site
+```
+
 ---
 
 ## CLI Flag Reference
@@ -183,6 +211,13 @@ Other:
 - `--verify-fast` Alias for `--verify-after` (fast mode).
 - `--verify-checksums` (Deprecated) Legacy alias retained for backward compatibility (acts like `--verify-after`).
 - `--selftest-verification` Internal developer self-test for checksum summary parsing (does not perform a clone).
+- `--incremental` Enable conditional fetching (wget2 `-N`) and record a lightweight state snapshot for future diffs.
+- `--diff-latest` Generate a JSON diff vs previous state (if present) summarizing added / removed / modified files (hash-based) after the run.
+- `--config FILE` Load option defaults from JSON or YAML (YAML requires optional PyYAML; CLI flags still win).
+- `--plugins-dir DIR` Load plugin `.py` files (post_asset / finalize hooks).
+- `--json-logs` Emit structured JSON events (currently plugin load & asset modification; future expansion planned).
+- `--profile` Emit a `[profile] { ... }` JSON object with phase duration metrics.
+- `--checksum-ext ext1,ext2` Extend checksum coverage beyond HTML & API JSON (e.g., css,js,png,svg) – cost grows with file count/size.
 
 Noise Reduction Tip:
 
@@ -208,9 +243,42 @@ This limits traversal to matching routes while hiding the individual enqueue log
   clone_manifest.json (unless --no-manifest)
   .folder.default.<port>.conf
 
-If `--checksums` is enabled, SHA256 hashes are embedded in `clone_manifest.json` under a `checksums` object mapping relative paths to their digest. This is useful for integrity verification, diffing between runs, or external audit pipelines. The checksum phase runs after cloning (and prerender if enabled) and reports progress in the GUI console (or periodic updates headless). To re-verify later you can script a simple walker comparing stored digests to freshly computed ones.
+If `--checksums` is enabled, SHA256 hashes are embedded in `clone_manifest.json` under `checksums_sha256` mapping relative paths to digest. This is useful for integrity verification, diffing, or external audit pipelines. The checksum phase runs after cloning (and prerender if enabled) and reports progress (GUI) or percentage lines (headless). A timing entry is recorded (manifest.timings.checksums_seconds) along with per-phase durations if available.
 If extra extensions were provided via `--checksum-ext`, they appear in the manifest under `checksum_extra_extensions`.
 If verification is requested (`--verify-after` / GUI "Verify after clone"), the tool invokes an internal verifier that recomputes and compares digests, appending a summary (status + counts) to both the manifest and project README. Fast mode (default) ignores missing files; deep mode flags them.
+
+### Incremental State & Diff Reports
+
+When `--incremental` is used, a hidden `.cw2dt/state.json` snapshot (hash + size + mtime for selected files) is written. On subsequent runs with `--diff-latest`, a diff JSON (added / removed / modified / unchanged_count) is generated under `.cw2dt/diff_<timestamp>.json` and summarized to stdout. This is hash-based (SHA256) for deterministic detection of content changes.
+
+### Plugin Hooks
+
+Place Python files in a directory and pass `--plugins-dir`. Supported optional functions:
+
+- `post_asset(rel_path, data_bytes, context)` -> return modified bytes/str or None (runs on HTML/CSS/JS assets)
+- `finalize(output_folder, manifest_dict, context)` -> mutate manifest or perform final actions
+
+Example `minify_plugin.py`:
+
+```python
+def post_asset(path, data, ctx):
+  if path.endswith('.html'):
+    return b"".join(l.strip() for l in data.splitlines())
+```
+
+### Verification Script Copy
+
+`verify_checksums.py` is copied into each project folder (if checksums used) for offline integrity checks:
+
+```bash
+python verify_checksums.py --manifest clone_manifest.json --fast-missing
+```
+
+Exit codes: 0 = all match, 3 = mismatches or missing, 2 = manifest not found.
+
+### Profiling & Timings
+
+`--profile` prints a JSON object with phase durations. Independently, when run via GUI or headless with checksums/prerender/build, the manifest records `phase_durations_seconds` and a `timings` object (including `checksums_seconds` if applicable). If API capture was enabled but no JSON resulted, `api_capture_note` clarifies the absence.
 ```
 
 ## Dynamic Rendering (Prerender) Details
@@ -301,6 +369,9 @@ Limitations & Notes:
 - **Authentication needed for dynamic assets**: Use browser cookies or HTTP auth before prerender.
 - **Cloning interrupted**: Re-run with same output and wget2 will resume.
 - **Icons not visible**: Place `web_logo.png`, `arrow_right.png`, `docker_logo.png` under `./images/` or alongside the script.
+- **Diff report empty**: Ensure at least one prior run with `--incremental` produced a state.json before adding `--diff-latest`.
+- **Invalid router regex**: Tool will log and ignore patterns that fail to compile; correct them and retry.
+- **No API JSON captured**: Confirm the app returns `Content-Type: application/json` and endpoints are hit during prerender. Otherwise the manifest includes an explanatory note.
 
 ---
 
@@ -322,6 +393,8 @@ Longer-Term:
 
 - Pluggable post-process pipeline (minify, hash, integrity attributes)
 - Incremental update mode (update only changed pages/assets)
+- Structured logging expansion (progress, phases) in JSON logs
+- Additional plugin hook phases (pre_download, pre_build)
 - Export to static hosting manifests (Netlify, Vercel rewrites)
 
 ---
@@ -335,3 +408,17 @@ Longer-Term:
 ## Author
 
 Randy Northrup
+
+---
+
+## Testing
+
+Unit tests cover validation, verification parsing/execution, checksum hashing (including extra extensions), diff computation, and config loading. To run:
+
+```bash
+python -m unittest discover -v
+```
+
+Add the environment variable `CW2DT_NO_QT=1` to skip GUI initialization in test contexts.
+
+Planned additions: plugin hook simulation tests, JSON log event assertions, and profiling output validation.

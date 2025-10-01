@@ -14,7 +14,7 @@ signals which are merged into a single animated progress bar in the GUI.
 import sys, os, subprocess, shutil, platform, socket, webbrowser, ipaddress, importlib, time
 from typing import Optional
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Qt imports are deferred until after headless handling to allow running without PySide6 installed.
 
@@ -732,6 +732,25 @@ def headless_main(argv: list[str]) -> int:
 
     args = parser.parse_args(argv)
 
+    # Pre-compile router regex patterns early to surface invalid patterns immediately
+    if args.router_allow or args.router_deny:
+        import re as _re
+        def _compile_list(raw: str | None):
+            out = []
+            invalid = []
+            for pat in [p.strip() for p in (raw.split(',') if raw else []) if p.strip()]:
+                try:
+                    out.append(_re.compile(pat))
+                except Exception:
+                    invalid.append(pat)
+            return out, invalid
+        _allow_res, _allow_bad = _compile_list(args.router_allow)
+        _deny_res, _deny_bad = _compile_list(args.router_deny)
+        if _allow_bad:
+            print(f"[router] Invalid allow regex patterns ignored: {', '.join(_allow_bad)}")
+        if _deny_bad:
+            print(f"[router] Invalid deny regex patterns ignored: {', '.join(_deny_bad)}")
+
     # Config file merge (config provides defaults; CLI overrides)
     if args.config:
         cfg = _load_config_file(args.config)
@@ -1189,14 +1208,47 @@ if __name__ == '__main__':
                 sys.exit(2)
         sys.exit(headless_main(argv))
 
-# After headless early-exit, import Qt for GUI definitions below
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
-    QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
-)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
-from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
+# After headless early-exit, import Qt for GUI definitions below (unless explicitly disabled for tests)
+if not CW2DT_NO_QT:
+    from PySide6.QtWidgets import (
+        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
+        QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
+        QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
+    )
+    from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
+    from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
+else:
+    # Minimal stubs to allow type hints; tests won't instantiate GUI components
+    QThread = object  # type: ignore
+    class Signal:  # type: ignore
+        def __init__(self, *_, **__): pass
+        def connect(self, *_, **__): pass
+    # Basic stand-ins so class definitions referencing QWidget/QFrame/etc. do not fail during import in tests
+    class QWidget:  # type: ignore
+        pass
+    class QFrame(QWidget):  # type: ignore
+        Shape = type('Shape', (), {})
+    class QLabel(QWidget):  # type: ignore
+        def __init__(self, *_, **__): pass
+        def setText(self, *_, **__): pass
+        def setProperty(self, *_, **__): pass
+    class QLayout:  # type: ignore
+        pass
+    class QSplitter(QWidget):  # type: ignore
+        def __init__(self, *_, **__): pass
+        def orientation(self): return 0
+        def count(self): return 0
+        def handleWidth(self): return 8
+        def widget(self, *_): return QWidget()
+        def setSizes(self, *_): pass
+    class QSplitterHandle(QWidget):  # type: ignore
+        def __init__(self, *_, **__): pass
+    class QProgressBar(QWidget):  # type: ignore
+        def setRange(self, *_, **__): pass
+        def setValue(self, *_, **__): pass
+        def setTextVisible(self, *_, **__): pass
+        def setFixedHeight(self, *_, **__): pass
+        def setStyleSheet(self, *_, **__): pass
 
 def image_exists_locally(image_name: str) -> bool:
     if not image_name:
@@ -1460,13 +1512,14 @@ class CloneThread(QThread):
         self._router_discovered_count = 0
         self.router_quiet = False  # set by GUI option if enabled
         self._api_captured_count = 0
-        self._started_utc = datetime.utcnow()
+        # Use timezone-aware UTC for manifests
+        self._started_utc = datetime.now(timezone.utc)
         self.no_manifest = bool(no_manifest)
         self.checksums = bool(checksums)
         self.checksum_extra_ext = [e.lower().lstrip('.') for e in (checksum_extra_ext or []) if e]
         # phase timing (store simple floats)
-        self._phase_start_time = {}
-        self._phase_end_time = {}
+        self._phase_start_time: dict[str, float] = {}
+        self._phase_end_time: dict[str, float] = {}
 
     def request_stop(self):
         self._stop_requested = True
@@ -1506,14 +1559,15 @@ class CloneThread(QThread):
         self._phase_pct = {p: 0 for p in phases}
         # Base heuristic weights then adjust for presence of optional phases
         if self.build_docker:
+            # Requested custom weighting when all phases present: clone 0.55, prerender 0.15, checksums 0.05, build 0.20, cleanup 0.05
             if self.prerender and self.checksums:
-                weights = {"clone": 0.42, "prerender": 0.15, "checksums": 0.08, "build": 0.30, "cleanup": 0.05}
+                weights = {"clone": 0.55, "prerender": 0.15, "checksums": 0.05, "build": 0.20, "cleanup": 0.05}
             elif self.prerender and not self.checksums:
                 weights = {"clone": 0.45, "prerender": 0.15, "build": 0.35, "cleanup": 0.05}
             elif self.checksums and not self.prerender:
                 weights = {"clone": 0.55, "checksums": 0.10, "build": 0.30, "cleanup": 0.05}
             else:
-                weights = {"clone": 0.6, "build": 0.4, "cleanup": 0.05}
+                weights = {"clone": 0.60, "build": 0.40, "cleanup": 0.05}
         else:
             if self.prerender and self.checksums:
                 weights = {"clone": 0.58, "prerender": 0.20, "checksums": 0.12, "cleanup": 0.10}
@@ -1860,8 +1914,8 @@ class CloneThread(QThread):
                 "url": self.url,
                 "docker_name": self.docker_name,
                 "output_folder": os.path.abspath(output_folder),
-                "started_utc": self._started_utc.isoformat() + 'Z',
-                "completed_utc": datetime.utcnow().isoformat() + 'Z',
+                "started_utc": self._started_utc.isoformat(),
+                "completed_utc": datetime.now(timezone.utc).isoformat(),
                 "clone_success": clone_success,
                 "docker_built": docker_success,
                 "prerender": self.prerender,
@@ -1883,7 +1937,9 @@ class CloneThread(QThread):
             }
                 # Optionally compute checksums (HTML + API JSON + extra ext)
                 if self.checksums:
+                    import time as _t
                     emit_total("checksums", 0)
+                    _chk_start = _t.time()
                     def _gui_progress(processed, total):
                         pct = int(processed * 100 / total) if total else 100
                         try:
@@ -1894,11 +1950,13 @@ class CloneThread(QThread):
                         except Exception: pass
                         emit_total("checksums", pct)
                     checks = compute_checksums(output_folder, self.checksum_extra_ext, progress_cb=_gui_progress)
+                    _chk_end = _t.time()
                     manifest['checksums_sha256'] = checks
                     if self.checksum_extra_ext:
                         manifest['checksum_extra_extensions'] = self.checksum_extra_ext
+                    manifest.setdefault('timings', {})['checksums_seconds'] = round(_chk_end - _chk_start, 4)
                     try:
-                        self.progress.emit("Checksums complete (100%).")
+                        self.progress.emit(f"Checksums complete: {len(checks)} files hashed • manifest updated.")
                     except Exception:
                         pass
                 # Phase timing summary (seconds)
@@ -1911,11 +1969,36 @@ class CloneThread(QThread):
                             timings[ph] = round(et - st, 2)
                     if timings:
                         manifest['phase_durations_seconds'] = timings
+                        # Also expose under unified 'timings' key (includes total if available)
+                        manifest.setdefault('timings', {}).update({k+"_seconds": v for k,v in timings.items()})
+                        try:
+                            # total approx = sum of measured (better than wall total because of overlaps? use wall if needed)
+                            wall_total = 0.0
+                            for v in timings.values():
+                                wall_total += float(v)
+                            manifest['timings'].setdefault('total_measured_seconds', round(wall_total, 2))
+                        except Exception:
+                            pass
                 # API capture note if enabled but none found
                 if manifest.get('api_capture') and not manifest.get('api_captured_count'):
                     manifest['api_capture_note'] = 'API capture enabled but no JSON responses matched filtering.'
+                else:
+                    if manifest.get('api_capture'):
+                        manifest.setdefault('api_capture_note', 'API capture produced one or more JSON files.')
+                # Timezone-aware completion time
+                manifest['completed_utc'] = datetime.now(timezone.utc).isoformat()
                 with open(os.path.join(output_folder, 'clone_manifest.json'), 'w', encoding='utf-8') as mf:
                     json.dump(manifest, mf, indent=2)
+                # Copy verify script into project for portability
+                try:
+                    _vs = os.path.join(os.path.dirname(__file__), 'verify_checksums.py')
+                    if os.path.exists(_vs):
+                        import shutil as _sh
+                        dst_vs = os.path.join(output_folder, 'verify_checksums.py')
+                        if not os.path.exists(dst_vs):
+                            _sh.copy2(_vs, dst_vs)
+                except Exception:
+                    pass
                 readme_path = os.path.join(output_folder, f"README_{(self.docker_name or 'site').strip()}.md")
                 try:
                     repro = self._build_repro_command()
@@ -3719,6 +3802,24 @@ class DockerClonerGUI(QWidget):
         router_wait_selector = (self.router_wait_selector_edit.text().strip() or None) if hasattr(self,'router_wait_selector_edit') else None
         router_allow = ([p.strip() for p in self.router_allow_edit.text().split(',') if p.strip()] if (hasattr(self,'router_allow_edit') and self.router_allow_edit.isEnabled() and self.router_allow_edit.text().strip()) else None)
         router_deny = ([p.strip() for p in self.router_deny_edit.text().split(',') if p.strip()] if (hasattr(self,'router_deny_edit') and self.router_deny_edit.isEnabled() and self.router_deny_edit.text().strip()) else None)
+        # Pre-compile to validate patterns and drop invalid ones
+        import re as _re
+        def _validate_list(lst):
+            if not lst:
+                return lst
+            good = []
+            bad = []
+            for pat in lst:
+                try:
+                    _re.compile(pat)
+                    good.append(pat)
+                except Exception:
+                    bad.append(pat)
+            if bad:
+                self.console.append(f"Router regex invalid and ignored: {', '.join(bad)}")
+            return good or None
+        router_allow = _validate_list(router_allow)
+        router_deny = _validate_list(router_deny)
         cookies_file = getattr(self, 'imported_cookies_file', None) if (hasattr(self,'use_cookies_checkbox') and self.use_cookies_checkbox.isChecked()) else None
         no_manifest = hasattr(self,'skip_manifest_checkbox') and self.skip_manifest_checkbox.isChecked()
         checksums = hasattr(self,'checksums_checkbox') and self.checksums_checkbox.isChecked()

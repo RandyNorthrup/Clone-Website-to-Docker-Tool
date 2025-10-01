@@ -8,7 +8,7 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from cw2dt import parse_verification_summary, run_verification  # type: ignore
+from cw2dt_core import parse_verification_summary, run_verification  # type: ignore
 
 class TestParseVerificationSummary(unittest.TestCase):
     def test_valid_line(self):
