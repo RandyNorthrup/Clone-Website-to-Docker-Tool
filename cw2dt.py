@@ -14,6 +14,79 @@ DEFAULT_ROUTER_SETTLE_MS = 350  # ms
 DEFAULT_CONTAINER_PORT = 80
 DEFAULT_HOST_PORT = 8080
 
+# ---- verification helpers (shared GUI + headless) ----
+def parse_verification_summary(text: str):
+    """Parse verification stdout summary lines into a dict.
+    Expected summary token pattern: OK=\\d+ Missing=\\d+ Mismatched=\\d+ Total=\\d+
+    Returns dict with keys ok, missing, mismatched, total when found; values may be None if parsing fails.
+    """
+    if not text:
+        return { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
+    import re
+    summary_re = re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
+    for line in text.splitlines():
+        m = summary_re.search(line)
+        if m:
+            ok, missing, mismatched, total = map(int, m.groups())
+            return { 'ok': ok, 'missing': missing, 'mismatched': mismatched, 'total': total }
+    return { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
+
+def run_verification(manifest_path: str, fast: bool = True, docker_name: str | None = None, project_dir: str | None = None, readme: bool = True, output_cb=None):
+    """Run verification script returning (passed: bool, stats: dict or None).
+    If readme=True, append summary block to README_{docker_name}.md when present.
+    output_cb: optional callable(str) to stream each stdout line.
+    """
+    import json, subprocess as _sp, sys as _sys, os as _os
+    if not manifest_path or not _os.path.exists(manifest_path):
+        return False, None
+    cmd = [_sys.executable, _os.path.join(_os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path]
+    if fast:
+        cmd.append('--fast-missing')
+    try:
+        res = _sp.run(cmd, capture_output=True, text=True)
+    except Exception as e:
+        if output_cb:
+            output_cb(f"[verify] error launching verifier: {e}")
+        return False, None
+    if res.stdout and output_cb:
+        for line in res.stdout.splitlines():
+            output_cb(line)
+    stats = parse_verification_summary(res.stdout or '')
+    passed = (res.returncode == 0)
+    # Update manifest with verification block
+    try:
+        with open(manifest_path,'r',encoding='utf-8') as mf:
+            data = json.load(mf)
+        data['verification'] = {
+            'status':'passed' if passed else 'failed',
+            'ok': stats['ok'],
+            'missing': stats['missing'],
+            'mismatched': stats['mismatched'],
+            'total': stats['total'],
+            'fast_missing': fast
+        }
+        with open(manifest_path,'w',encoding='utf-8') as mf:
+            json.dump(data, mf, indent=2)
+    except Exception:
+        pass
+    # README append
+    if readme and docker_name and project_dir:
+        try:
+            rd = os.path.join(project_dir, f"README_{docker_name}.md")
+            if os.path.exists(rd):
+                with open(rd,'a',encoding='utf-8') as rf:
+                    rf.write("\n### Verification Result\n")
+                    if passed:
+                        if stats['ok'] is not None and stats['total'] is not None:
+                            rf.write(f"Passed ({stats['ok']}/{stats['total']} files)\n")
+                        else:
+                            rf.write("Passed\n")
+                    else:
+                        rf.write(f"Failed (ok={stats['ok']} missing={stats['missing']} mismatched={stats['mismatched']} total={stats['total']})\n")
+        except Exception:
+            pass
+    return passed, stats
+
 
 def count_files_and_partials(base_path: str):
     total = 0
@@ -461,7 +534,9 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--no-manifest', action='store_true', help='Skip writing clone_manifest.json and summary augmentation')
     parser.add_argument('--checksums', action='store_true', help='Compute SHA256 checksums for mirrored HTML and captured API JSON (adds time)')
     parser.add_argument('--checksum-ext', default=None, help='Comma-separated extra file extensions to also checksum (e.g. css,js,png)')
-    parser.add_argument('--verify-checksums', action='store_true', help='After clone (and optional checksum generation), verify manifest checksums')
+    parser.add_argument('--verify-checksums', action='store_true', help='[Deprecated alias] Verify manifest checksums (fast mode)')
+    parser.add_argument('--verify-after', action='store_true', help='Verify manifest after clone (fast unless --verify-deep)')
+    parser.add_argument('--verify-deep', action='store_true', help='Deep verification (do not skip missing)')
 
     args = parser.parse_args(argv)
 
@@ -584,19 +659,21 @@ def headless_main(argv: list[str]) -> int:
             with open(manifest_path, 'w', encoding='utf-8') as mf:
                 json.dump(manifest, mf, indent=2)
             print('[manifest] clone_manifest.json written.')
-            if args.verify_checksums and args.checksums:
-                try:
-                    import subprocess, sys as _sys
-                    ver_cmd = [_sys.executable, os.path.join(os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path, '--fast-missing']
-                    print('[verify] running checksum verification...')
-                    r = subprocess.run(ver_cmd, capture_output=True, text=True)
-                    sys.stdout.write(r.stdout)
-                    if r.returncode != 0:
-                        print('[verify] checksum verification FAILED (non-zero exit)')
-                    else:
-                        print('[verify] checksum verification PASSED')
-                except Exception as e:
-                    print(f'[verify] error during verification: {e}')
+            if (args.verify_checksums or args.verify_after) and args.checksums:
+                print('[verify] running checksum verification...')
+                fast = not args.verify_deep
+                passed, stats = run_verification(
+                    manifest_path,
+                    fast=fast,
+                    docker_name=args.docker_name,
+                    project_dir=output_folder,
+                    readme=True,
+                    output_cb=lambda line: print(line)
+                )
+                if passed:
+                    print('[verify] checksum verification PASSED')
+                else:
+                    print('[verify] checksum verification FAILED')
         except Exception as e:
             print(f"[warn] Failed to write manifest: {e}")
     if args.disable_js:
