@@ -420,7 +420,7 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
 
 # ---------- headless CLI ----------
 def headless_main(argv: list[str]) -> int:
-    import argparse
+    import argparse, subprocess
     parser = argparse.ArgumentParser(description="Clone website to a Docker-ready folder (headless mode)")
     parser.add_argument('--headless', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--url', required=True, help='Website URL to mirror')
@@ -461,6 +461,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--no-manifest', action='store_true', help='Skip writing clone_manifest.json and summary augmentation')
     parser.add_argument('--checksums', action='store_true', help='Compute SHA256 checksums for mirrored HTML and captured API JSON (adds time)')
     parser.add_argument('--checksum-ext', default=None, help='Comma-separated extra file extensions to also checksum (e.g. css,js,png)')
+    parser.add_argument('--verify-checksums', action='store_true', help='After clone (and optional checksum generation), verify manifest checksums')
 
     args = parser.parse_args(argv)
 
@@ -579,9 +580,23 @@ def headless_main(argv: list[str]) -> int:
                     if idx == 1 or idx == total or idx % 50 == 0:
                         print(f"[checksums] {idx}/{total} ({int(idx*100/total)}%)")
                 manifest['checksums_sha256'] = checks
-            with open(os.path.join(output_folder, 'clone_manifest.json'), 'w', encoding='utf-8') as mf:
+            manifest_path = os.path.join(output_folder, 'clone_manifest.json')
+            with open(manifest_path, 'w', encoding='utf-8') as mf:
                 json.dump(manifest, mf, indent=2)
             print('[manifest] clone_manifest.json written.')
+            if args.verify_checksums and args.checksums:
+                try:
+                    import subprocess, sys as _sys
+                    ver_cmd = [_sys.executable, os.path.join(os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path, '--fast-missing']
+                    print('[verify] running checksum verification...')
+                    r = subprocess.run(ver_cmd, capture_output=True, text=True)
+                    sys.stdout.write(r.stdout)
+                    if r.returncode != 0:
+                        print('[verify] checksum verification FAILED (non-zero exit)')
+                    else:
+                        print('[verify] checksum verification PASSED')
+                except Exception as e:
+                    print(f'[verify] error during verification: {e}')
         except Exception as e:
             print(f"[warn] Failed to write manifest: {e}")
     if args.disable_js:
