@@ -1507,26 +1507,7 @@ class CloneThread(QThread):
                     json.dump(manifest, mf, indent=2)
                 readme_path = os.path.join(output_folder, f"README_{(self.docker_name or 'site').strip()}.md")
                 try:
-                    repro = ["python cw2dt.py --headless", f"--url '{self.url}'", f"--dest '{self.save_path}'", f"--docker-name '{self.docker_name}'"]
-                    if self.prerender: repro.append("--prerender")
-                    if self.prerender and self.prerender_max_pages != 40: repro.append(f"--prerender-max-pages {self.prerender_max_pages}")
-                    if self.capture_api: repro.append("--capture-api")
-                    if not self.rewrite_urls: repro.append("--no-url-rewrite")
-                    if self.router_intercept: repro.append("--router-intercept")
-                    if self.router_intercept and self.router_include_hash: repro.append("--router-include-hash")
-                    if self.router_intercept and self.router_max_routes != 200: repro.append(f"--router-max-routes {self.router_max_routes}")
-                    if self.router_intercept and self.router_settle_ms != 350: repro.append(f"--router-settle-ms {self.router_settle_ms}")
-                    if self.router_intercept and self.router_wait_selector: repro.append(f"--router-wait-selector '{self.router_wait_selector}'")
-                    if self.router_intercept and self.router_allow: repro.append(f"--router-allow {','.join(self.router_allow)}")
-                    if self.router_intercept and self.router_deny: repro.append(f"--router-deny {','.join(self.router_deny)}")
-                    if self.router_intercept and self.router_quiet: repro.append("--router-quiet")
-                    if self.disable_js: repro.append("--disable-js")
-                    if self.size_cap: repro.append(f"--size-cap {human_quota_suffix(self.size_cap)}")
-                    if self.throttle: repro.append(f"--throttle {human_rate_suffix(self.throttle)}")
-                    if self.parallel_jobs > 1: repro.append(f"--jobs {self.parallel_jobs}")
-                    if self.checksums: repro.append("--checksums")
-                    if self.checksum_extra_ext: repro.append(f"--checksum-ext {','.join(self.checksum_extra_ext)}")
-                    if self.no_manifest: repro.append("--no-manifest")
+                    repro = self._build_repro_command()
                     with open(readme_path, 'a', encoding='utf-8') as rf:
                         rf.write("\n\n---\n## Clone Summary\n")
                         rf.write(f"- Prerender: {'yes' if self.prerender else 'no'}\n")
@@ -1622,6 +1603,55 @@ class CloneThread(QThread):
             self.progress.emit("Cloning site: 100%")
             emit_total_cb("clone", 100)
         return True
+
+    # ----- helper builders -----
+    def _build_repro_command(self) -> list[str]:
+        """Assemble an approximate reproduction command reflecting the clone options.
+        Only includes non-default or enabled flags to keep it concise.
+        """
+        cmd = ["python cw2dt.py --headless",
+               f"--url '{self.url}'",
+               f"--dest '{self.save_path}'",
+               f"--docker-name '{self.docker_name}'"]
+        if self.prerender:
+            cmd.append("--prerender")
+            if self.prerender_max_pages != DEFAULT_PRERENDER_MAX_PAGES:
+                cmd.append(f"--prerender-max-pages {self.prerender_max_pages}")
+            if self.capture_api:
+                cmd.append("--capture-api")
+            if not self.rewrite_urls:
+                cmd.append("--no-url-rewrite")
+        if self.router_intercept:
+            cmd.append("--router-intercept")
+            if self.router_include_hash:
+                cmd.append("--router-include-hash")
+            if self.router_max_routes != DEFAULT_ROUTER_MAX_ROUTES:
+                cmd.append(f"--router-max-routes {self.router_max_routes}")
+            if self.router_settle_ms != DEFAULT_ROUTER_SETTLE_MS:
+                cmd.append(f"--router-settle-ms {self.router_settle_ms}")
+            if self.router_wait_selector:
+                cmd.append(f"--router-wait-selector '{self.router_wait_selector}'")
+            if self.router_allow:
+                cmd.append(f"--router-allow {','.join(self.router_allow)}")
+            if self.router_deny:
+                cmd.append(f"--router-deny {','.join(self.router_deny)}")
+            if self.router_quiet:
+                cmd.append("--router-quiet")
+        if self.disable_js:
+            cmd.append("--disable-js")
+        if self.size_cap:
+            cmd.append(f"--size-cap {human_quota_suffix(self.size_cap)}")
+        if self.throttle:
+            cmd.append(f"--throttle {human_rate_suffix(self.throttle)}")
+        if self.parallel_jobs > 1:
+            cmd.append(f"--jobs {self.parallel_jobs}")
+        if self.checksums:
+            cmd.append("--checksums")
+            if self.checksum_extra_ext:
+                cmd.append(f"--checksum-ext {','.join(self.checksum_extra_ext)}")
+        if self.no_manifest:
+            cmd.append("--no-manifest")
+        return cmd
 
     def _estimate_with_spider(self, url: str) -> int:
         """Run wget2 in spider mode to estimate number of URLs to fetch."""
