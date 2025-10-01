@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QTextEdit, QCheckBox, QSpinBox, QMessageBox, QProgressBar, QGroupBox, QComboBox, QSplitter,
     QScrollArea, QToolButton, QFrame, QSizePolicy
 )
-from PySide6.QtCore import Qt, QThread, Signal, QEvent
+from PySide6.QtCore import Qt, QThread, Signal, QEvent, QSize
 from PySide6.QtGui import QPixmap, QIcon
 
 from cw2dt_core import (
@@ -189,6 +189,8 @@ class DockerClonerGUI(QWidget):
         self._compute_and_lock_min_size()
         # Apply descriptive tooltips to all interactive widgets
         self._apply_tooltips()
+        # Normalize button appearance (uniform sizing / padding)
+        self._normalize_buttons()
 
     # Helpers
     def _browse_dest(self):
@@ -268,6 +270,44 @@ class DockerClonerGUI(QWidget):
             self.metric_lbl.setToolTip('Inline live metrics: bandwidth, routes discovered, API captures, checksum progress, etc.')
         if hasattr(self,'phase_time_lbl'):
             self.phase_time_lbl.setToolTip('Elapsed time per completed phase (auto-updated).')
+
+    def _normalize_buttons(self):
+        """Ensure all primary QPushButtons share consistent min size and padding.
+        Keeps visual rhythm across rows without hard-locking dynamic resize behavior."""
+        buttons=[getattr(self,n) for n in (
+            'btn_clone','btn_estimate','btn_pause','btn_cancel','btn_wizard',
+            'btn_run_docker','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg'
+        ) if hasattr(self,n)]
+        if not buttons: return
+        # Determine a reasonable min width (longest text + padding heuristic)
+        fm=self.fontMetrics()
+        max_text_w=max(fm.horizontalAdvance(b.text()) for b in buttons)+28  # padding allowance
+        target_w=min(max(110, max_text_w), 220)  # clamp upper bound to avoid overly wide buttons
+        for b in buttons:
+            try:
+                b.setMinimumHeight(32)
+                b.setMinimumWidth(target_w)
+                b.setIconSize(QSize(16,16))
+            except Exception:
+                pass
+        # Apply a light stylesheet only to these buttons (avoid QToolButton toggles)
+        style="""
+QPushButton {
+  padding:4px 10px;
+  font-weight:500;
+  border:1px solid #5a5a5a;
+  border-radius:4px;
+  background:#2e2e2e;
+  color:#f0f0f0;
+}
+QPushButton:hover { background:#3a3a3a; }
+QPushButton:pressed { background:#444; }
+QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
+"""
+        # Merge with any existing stylesheet on the root widget
+        prev=self.styleSheet() or ''
+        if 'QPushButton' not in prev:  # avoid duplicating if already applied
+            self.setStyleSheet(prev + ('\n' if prev else '') + style)
 
     def _update_dependency_banner(self):
         msgs=[]
