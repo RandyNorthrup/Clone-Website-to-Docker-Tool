@@ -2230,10 +2230,14 @@ class DockerClonerGUI(QWidget):
         integ_layout = QGridLayout(); integ_layout.setHorizontalSpacing(10); integ_layout.setVerticalSpacing(6)
         self.checksums_checkbox = QCheckBox("Generate checksums")
         self.skip_manifest_checkbox = QCheckBox("Skip manifest")
+        self.verify_checksums_checkbox = QCheckBox("Verify after clone")
+        self.verify_checksums_checkbox.setToolTip("After clone completes and checksums manifest is written, verify all recorded hashes.")
+        self.verify_checksums_checkbox.setEnabled(True)
         self.checksum_extra_edit = QLineEdit(); self.checksum_extra_edit.setPlaceholderText("Extra checksum extensions (e.g. css,js)")
         integ_layout.addWidget(self.checksums_checkbox,0,0)
         integ_layout.addWidget(self.skip_manifest_checkbox,0,1)
-        integ_layout.addWidget(self.checksum_extra_edit,1,0,1,2)
+        integ_layout.addWidget(self.verify_checksums_checkbox,0,2)
+        integ_layout.addWidget(self.checksum_extra_edit,1,0,1,3)
         self.integrity_section = CollapsibleSection("Integrity & Artifacts", start_collapsed=True)
         self.integrity_section.setContentLayout(integ_layout)
         card_layout.addWidget(self.integrity_section)
@@ -2956,6 +2960,10 @@ class DockerClonerGUI(QWidget):
             self.console.append(f"Parallel downloads: enabled • jobs={parallel_jobs} ({src})")
         else:
             self.console.append(f"Parallel downloads: disabled ({src})")
+        # Prepare extra checksum extensions list (comma-separated input)
+        raw_extra_ext = []
+        if hasattr(self, 'checksum_extra_edit') and self.checksum_extra_edit.text().strip():
+            raw_extra_ext = [e.strip() for e in self.checksum_extra_edit.text().split(',') if e.strip()]
         worker = CloneThread(
             url, project_dir_name, save_path,
             self.build_checkbox.isChecked(),
@@ -2979,8 +2987,10 @@ class DockerClonerGUI(QWidget):
             router_deny=([p.strip() for p in self.router_deny_edit.text().split(',') if p.strip()] if (hasattr(self,'router_deny_edit') and self.router_deny_edit.isEnabled() and self.router_deny_edit.text().strip()) else None),
             cookies_file=getattr(self, 'imported_cookies_file', None) if self.use_cookies_checkbox.isChecked() else None,
             no_manifest=(self.skip_manifest_checkbox.isChecked() if hasattr(self,'skip_manifest_checkbox') and self.skip_manifest_checkbox else False),
-            checksums=(self.checksums_checkbox.isChecked() if hasattr(self,'checksums_checkbox') and self.checksums_checkbox else False)
+            checksums=(self.checksums_checkbox.isChecked() if hasattr(self,'checksums_checkbox') and self.checksums_checkbox else False),
+            checksum_extra_ext=raw_extra_ext or None
         )
+        verify_after = bool(hasattr(self, 'verify_checksums_checkbox') and self.verify_checksums_checkbox.isChecked())
         if hasattr(self, 'router_quiet_checkbox') and self.router_quiet_checkbox.isEnabled():
             worker.router_quiet = self.router_quiet_checkbox.isChecked()
         self.clone_thread = worker
@@ -2999,6 +3009,37 @@ class DockerClonerGUI(QWidget):
         except Exception:
             pass
         worker.finished.connect(self.clone_finished)
+        if verify_after:
+            orig_clone_finished = self.clone_finished
+            def _finish_wrapper(log_text: str, docker_ok: bool, clone_ok: bool):
+                # first run original handler
+                orig_clone_finished(log_text, docker_ok, clone_ok)
+                # then schedule verification
+                def _run_verify():
+                    try:
+                        manifest_path = os.path.join(self.last_project_dir or '', 'clone_manifest.json')
+                        if not manifest_path or not os.path.exists(manifest_path):
+                            self.console.append("[verify] Manifest not found; skipping verification")
+                            return
+                        self.console.append("[verify] Running checksum verification…")
+                        import subprocess, sys as _sys
+                        cmd = [_sys.executable, os.path.join(os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path, '--fast-missing']
+                        res = subprocess.run(cmd, capture_output=True, text=True)
+                        if res.stdout:
+                            for line in res.stdout.strip().splitlines():
+                                self.console.append(line)
+                        if res.returncode == 0:
+                            self.console.append("[verify] PASSED")
+                        else:
+                            self.console.append("[verify] FAILED (see above)")
+                    except Exception as e:
+                        self.console.append(f"[verify] Error: {e}")
+                QTimer.singleShot(0, _run_verify)
+            try:
+                worker.finished.disconnect(self.clone_finished)
+            except Exception:
+                pass
+            worker.finished.connect(_finish_wrapper)
         # status bar will show progress during tasks
         # Disable clone button during operation to prevent double-starts
         self.clone_btn.setEnabled(False)
