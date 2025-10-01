@@ -349,10 +349,75 @@ Captured API responses live separately from HTML; you can diff them, replay them
 
 Limitations & Notes:
 
-- Prerender is breadth-first link discovery via anchors only (no router event interception yet).
-- Client-side navigation triggered without `<a>` elements (e.g., button handlers) may need a hook script to enqueue additional URLs.
+- Router interception (history API patching for pushState/replaceState/hashchange/click) is implemented; README earlier versions stated it was future—this has been updated for accuracy.
+- Purely programmatic navigations that never alter history or anchor links (e.g., custom in‑memory view swaps) still require a hook script to trigger additional states.
+- Infinite scroll or lazy content may need hook-assisted scrolling.
 - Large SPAs may need an increased `--prerender-max-pages` or targeted hook logic.
 - If Playwright isn't installed, the step is skipped with a warning; the static wget2 mirror still succeeds.
+
+### Maximum Fidelity Mode (Power Profile)
+
+For the closest 1:1 snapshot of a modern SPA (deep navigation + dynamic content), consider enabling:
+
+```bash
+python cw2dt.py --headless \
+  --url "https://target.example" \
+  --dest ./out --docker-name target \
+  --jobs 12 \
+  --prerender --prerender-max-pages 120 \
+  --router-intercept --router-max-routes 350 --router-settle-ms 900 \
+  --capture-api \
+  --hook-script ./hooks/fidelity.py \
+  --checksums --checksum-ext css,js,png,jpg,svg,json \
+  --verify-after --incremental --diff-latest
+```
+
+Recommendations:
+
+- Raise `--prerender-max-pages` gradually (avoid huge first runs).
+- Tune `--router-settle-ms` upward for late async route pushes (900–1500ms for heavy frameworks).
+- Use `--router-allow` to fence param explosions (`--router-allow "/products/,/docs/"`).
+- Author a fidelity hook script to: dismiss cookie banners, expand menus, scroll, click tabs, trigger lazy loads.
+- Add extra checksum extensions for broader integrity coverage.
+
+
+Hook scaffold (`hooks/fidelity.py`):
+
+```python
+def on_page(page, url, context):
+  # Dismiss common overlays
+  for sel in ['#cookie-accept', '.cookie-accept', '.modal-close']:
+    try:
+      btn = page.query_selector(sel)
+      if btn: btn.click()
+    except Exception:
+      pass
+  # Expand navigational elements
+  for sel in ['.menu-toggle', '.accordion-toggle', '[aria-expanded="false"]']:
+    for el in page.query_selector_all(sel)[:15]:
+      try: el.click()
+      except Exception: pass
+  # Simulate incremental scroll to trigger lazy loading
+  try:
+    for _ in range(6):
+      page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+      page.wait_for_timeout(350)
+  except Exception:
+    pass
+  # Click visible tab-like controls
+  for sel in ['[role=tab]', '.tab', '.nav-item']:
+    for el in page.query_selector_all(sel)[:12]:
+      try:
+        el.click(); page.wait_for_timeout(180)
+      except Exception: continue
+```
+
+Performance Caveats:
+
+- Higher page and route caps increase disk + time; iterate to find a sweet spot.
+- Avoid enabling power profile for purely static sites—wastes prerender budget.
+- Consider a two-pass approach: static baseline first (checksums), then prerender power profile with `--diff-latest` to see added value.
+
 
 ## Troubleshooting
 

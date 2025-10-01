@@ -10,6 +10,11 @@ All notable changes to this project will be documented here. The format loosely 
 - Removed enforced maximum width while keeping computed minimum width.
 - Added left-edge anchor (handled in `resizeEvent` / `moveEvent`) so expansion never drags the config area.
 
+### Documentation
+
+- Added "Maximum Fidelity Mode" section with power profile recipe & hook scaffold.
+- Corrected outdated note claiming router event interception was not implemented.
+
 ## [1.1.0] - 2025-10-01
 
 ### Added (Modularization)
