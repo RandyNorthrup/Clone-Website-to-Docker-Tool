@@ -14,6 +14,8 @@ DEFAULT_ROUTER_SETTLE_MS = 350  # ms
 DEFAULT_CONTAINER_PORT = 80
 DEFAULT_HOST_PORT = 8080
 
+ # (restored verification helpers header)
+
 # ---- verification helpers (shared GUI + headless) ----
 def parse_verification_summary(text: str):
     """Parse verification stdout summary lines into a dict.
@@ -32,13 +34,9 @@ def parse_verification_summary(text: str):
     return { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
 
 def run_verification(manifest_path: str, fast: bool = True, docker_name: str | None = None, project_dir: str | None = None, readme: bool = True, output_cb=None):
-    """Run verification script returning (passed: bool, stats: dict or None).
-    If readme=True, append summary block to README_{docker_name}.md when present.
-    output_cb: optional callable(str) to stream each stdout line.
-    """
     import json, subprocess as _sp, sys as _sys, os as _os
     if not manifest_path or not _os.path.exists(manifest_path):
-        return False, None
+        return False, { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
     cmd = [_sys.executable, _os.path.join(_os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path]
     if fast:
         cmd.append('--fast-missing')
@@ -47,123 +45,95 @@ def run_verification(manifest_path: str, fast: bool = True, docker_name: str | N
     except Exception as e:
         if output_cb:
             output_cb(f"[verify] error launching verifier: {e}")
-        return False, None
+        return False, { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
     if res.stdout and output_cb:
         for line in res.stdout.splitlines():
             output_cb(line)
     stats = parse_verification_summary(res.stdout or '')
     passed = (res.returncode == 0)
-    # Update manifest with verification block
+    # Update manifest
     try:
         with open(manifest_path,'r',encoding='utf-8') as mf:
             data = json.load(mf)
         data['verification'] = {
             'status':'passed' if passed else 'failed',
-            'ok': stats['ok'],
-            'missing': stats['missing'],
-            'mismatched': stats['mismatched'],
-            'total': stats['total'],
+            'ok': stats['ok'], 'missing': stats['missing'], 'mismatched': stats['mismatched'], 'total': stats['total'],
             'fast_missing': fast
         }
         with open(manifest_path,'w',encoding='utf-8') as mf:
             json.dump(data, mf, indent=2)
     except Exception:
         pass
-    # README append
+    # README
     if readme and docker_name and project_dir:
         try:
             rd = os.path.join(project_dir, f"README_{docker_name}.md")
             if os.path.exists(rd):
                 with open(rd,'a',encoding='utf-8') as rf:
                     rf.write("\n### Verification Result\n")
-                    if passed:
-                        if stats['ok'] is not None and stats['total'] is not None:
-                            rf.write(f"Passed ({stats['ok']}/{stats['total']} files)\n")
-                        else:
-                            rf.write("Passed\n")
+                    if passed and stats['ok'] is not None and stats['total'] is not None:
+                        rf.write(f"Passed ({stats['ok']}/{stats['total']} files)\n")
+                    elif passed:
+                        rf.write("Passed\n")
                     else:
                         rf.write(f"Failed (ok={stats['ok']} missing={stats['missing']} mismatched={stats['mismatched']} total={stats['total']})\n")
         except Exception:
             pass
     return passed, stats
 
-
+# (reinsert lost basic helpers)
+PARTIAL_SUFFIXES = {".tmp", ".part", ".partial", ".download"}
 def count_files_and_partials(base_path: str):
-    total = 0
-    partials = 0
+    total = 0; partials = 0
     if not base_path or not os.path.isdir(base_path):
-        return 0, 0
+        return 0,0
     for root, dirs, files in os.walk(base_path):
         for f in files:
             total += 1
-            name = f.lower()
+            lf = f.lower()
             for suf in PARTIAL_SUFFIXES:
-                if name.endswith(suf):
-                    partials += 1
-                    break
+                if lf.endswith(suf):
+                    partials += 1; break
     return total, partials
+
 def is_wget2_available():
     try:
-        subprocess.run(["wget2", "--version"], capture_output=True, check=True)
+        subprocess.run(["wget2","--version"], capture_output=True, check=True)
         return True
     except Exception:
         return False
 
 def get_install_cmd(program: str):
-    """
-    Return a best-effort install command list for the given program based on OS and available package manager.
-    program: one of 'wget2' or 'docker'.
-    """
-    mgrs_linux = [
-        "apt-get", "apt", "dnf", "yum", "pacman", "zypper", "apk"
-    ]
+    mgrs_linux = ["apt-get","apt","dnf","yum","pacman","zypper","apk"]
     os_name = platform.system()
     if os_name == "Darwin":
         if shutil.which("brew"):
-            if program == "wget2":
-                return ["brew","install","wget2"]
-            if program == "docker":
-                return ["brew","install","--cask","docker"]
+            if program == "wget2": return ["brew","install","wget2"]
+            if program == "docker": return ["brew","install","--cask","docker"]
         return None
     if os_name == "Linux":
         for mgr in mgrs_linux:
-            if not shutil.which(mgr):
-                continue
+            if not shutil.which(mgr): continue
             if program == "wget2":
-                if mgr in ("apt-get","apt"):
-                    return ["sudo", mgr, "install", "-y", "wget2"]
-                if mgr in ("dnf","yum"):
-                    return ["sudo", mgr, "install", "-y", "wget2"]
-                if mgr == "pacman":
-                    return ["sudo","pacman","-S","--noconfirm","wget2"]
-                if mgr == "zypper":
-                    return ["sudo","zypper","install","-y","wget2"]
-                if mgr == "apk":
-                    return ["sudo","apk","add","wget2"]
+                if mgr in ("apt-get","apt"): return ["sudo",mgr,"install","-y","wget2"]
+                if mgr in ("dnf","yum"): return ["sudo",mgr,"install","-y","wget2"]
+                if mgr == "pacman": return ["sudo","pacman","-S","--noconfirm","wget2"]
+                if mgr == "zypper": return ["sudo","zypper","install","-y","wget2"]
+                if mgr == "apk": return ["sudo","apk","add","wget2"]
             if program == "docker":
-                if mgr in ("apt-get","apt"):
-                    return ["sudo", mgr, "install", "-y", "docker.io"]
-                if mgr in ("dnf","yum"):
-                    return ["sudo", mgr, "install", "-y", "docker"]
-                if mgr == "pacman":
-                    return ["sudo","pacman","-S","--noconfirm","docker"]
-                if mgr == "zypper":
-                    return ["sudo","zypper","install","-y","docker"]
-                if mgr == "apk":
-                    return ["sudo","apk","add","docker"]
+                if mgr in ("apt-get","apt"): return ["sudo",mgr,"install","-y","docker.io"]
+                if mgr in ("dnf","yum"): return ["sudo",mgr,"install","-y","docker"]
+                if mgr == "pacman": return ["sudo","pacman","-S","--noconfirm","docker"]
+                if mgr == "zypper": return ["sudo","zypper","install","-y","docker"]
+                if mgr == "apk": return ["sudo","apk","add","docker"]
         return None
     if os_name == "Windows":
-        # wget2 packages for Windows are not reliably available via winget/choco.
-        # Prefer opening docs instead of copying a likely-broken command.
         if program == "wget2":
             return None
-        # Docker Desktop is available via winget/choco.
-        if shutil.which("winget"):
-            if program == "docker":
-                return ["winget","install","-e","--id","Docker.DockerDesktop"]
-        if shutil.which("choco"):
-            if program == "docker":
-                return ["choco","install","docker-desktop","-y"]
+        if shutil.which("winget") and program == "docker":
+            return ["winget","install","-e","--id","Docker.DockerDesktop"]
+        if shutil.which("choco") and program == "docker":
+            return ["choco","install","docker-desktop","-y"]
         return None
     return None
 
