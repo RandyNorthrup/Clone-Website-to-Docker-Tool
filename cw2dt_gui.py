@@ -168,12 +168,7 @@ class DockerClonerGUI(QWidget):
         self.btn_save_cfg=QPushButton('Save Config'); row2.addWidget(self.btn_save_cfg)
         self.btn_load_cfg=QPushButton('Load Config'); row2.addWidget(self.btn_load_cfg)
         row2.addStretch(1)
-        # Row 3: Section expand/collapse convenience
-        row3=QHBoxLayout(); row3.setSpacing(6)
-        self.btn_expand_all=QPushButton('Expand All'); row3.addWidget(self.btn_expand_all)
-        self.btn_collapse_all=QPushButton('Collapse All'); row3.addWidget(self.btn_collapse_all)
-        row3.addStretch(1)
-        rv.addLayout(row1); rv.addLayout(row2); rv.addLayout(row3)
+        rv.addLayout(row1); rv.addLayout(row2)
         self.prog=QProgressBar(); self.prog.setRange(0,100); rv.addWidget(self.prog)
         self.console=QTextEdit(); self.console.setReadOnly(True); rv.addWidget(self.console,1)
         self.splitter.addWidget(right); self.splitter.setStretchFactor(0,0); self.splitter.setStretchFactor(1,1)
@@ -189,10 +184,15 @@ class DockerClonerGUI(QWidget):
         _update_wizard_enabled(self.url_in.text())
         self.btn_save_cfg.clicked.connect(self._save_profile_dialog)
         self.btn_load_cfg.clicked.connect(self._load_profile_dialog)
-        self.btn_expand_all.clicked.connect(self._expand_all_sections)
-        self.btn_collapse_all.clicked.connect(self._collapse_all_sections)
         self._load_history()
         bar=QHBoxLayout(); bar.setSpacing(12); self.status_lbl=QLabel('Ready.'); self.metric_lbl=QLabel(''); self.phase_time_lbl=QLabel(''); bar.addWidget(self.status_lbl,1); bar.addWidget(self.metric_lbl,2); bar.addWidget(self.phase_time_lbl,2); root.addLayout(bar)
+        # Insert a slim toggle button at top of left panel (after history load) to expand/collapse all sections
+        self.btn_sections_toggle=QPushButton('Expand All')
+        self.btn_sections_toggle.setFlat(True)
+        self.btn_sections_toggle.setToolTip('Toggle expanding or collapsing all configuration sections.')
+        self.btn_sections_toggle.clicked.connect(self._toggle_all_sections)
+        # Prepend to config layout (index 0)
+        config_v.insertWidget(0, self.btn_sections_toggle)
         self._compute_and_lock_min_size()
         # Apply descriptive tooltips to all interactive widgets
         self._apply_tooltips()
@@ -263,8 +263,7 @@ class DockerClonerGUI(QWidget):
             'btn_deps':"Show installed / missing optional dependencies with install hints (commands copied to clipboard).",
             'btn_save_cfg':"Save current settings as a reusable profile (stored in ~/.cw2dt_profiles).",
             'btn_load_cfg':"Load a previously saved profile and apply its settings.",
-            'btn_expand_all':"Expand all configuration sections.",
-            'btn_collapse_all':"Collapse all configuration sections.",
+            'btn_sections_toggle':"Expand or collapse all configuration sections (toggles state).",
             'console':"Log output, progress messages, structured event summaries, and diagnostics.",
         }
         for name,text in tt.items():
@@ -285,9 +284,8 @@ class DockerClonerGUI(QWidget):
         Keeps visual rhythm across rows without hard-locking dynamic resize behavior."""
         buttons=[getattr(self,n) for n in (
             'btn_clone','btn_estimate','btn_pause','btn_cancel','btn_wizard',
-            'btn_run_docker','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg',
-            'btn_expand_all','btn_collapse_all'
-        ) if hasattr(self,n)]
+            'btn_run_docker','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg'
+        ) if hasattr(self,n)]  # sections toggle intentionally excluded (slim style)
         if not buttons: return
         # Determine a reasonable min width (longest text + padding heuristic)
         fm=self.fontMetrics()
@@ -307,8 +305,6 @@ class DockerClonerGUI(QWidget):
         if hasattr(self,'btn_cancel'): self.btn_cancel.setProperty('kind','danger')
         # Remaining default to secondary; optionally mark explicitly
         for name in ('btn_estimate','btn_pause','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg'):
-            if hasattr(self,name): getattr(self,name).setProperty('kind','secondary')
-        for name in ('btn_expand_all','btn_collapse_all'):
             if hasattr(self,name): getattr(self,name).setProperty('kind','secondary')
         # Apply a stylesheet with variant colors
         style="""
@@ -351,11 +347,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                     box._toggle.setChecked(True); box._on_toggled()
             except Exception:
                 pass
-        # Keep scroll at top for consistency
-        try:
-            self._config_scroll.verticalScrollBar().setValue(0)
-        except Exception:
-            pass
+        self._after_section_bulk_change()
 
     def _collapse_all_sections(self):
         for box in getattr(self,'_sections', []):
@@ -364,8 +356,26 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                     box._toggle.setChecked(False); box._on_toggled()
             except Exception:
                 pass
+        self._after_section_bulk_change()
+
+    def _after_section_bulk_change(self):
+        # Adjust toggle button text to reflect next action
         try:
+            any_collapsed=any(not b._toggle.isChecked() for b in self._sections)
+            if hasattr(self,'btn_sections_toggle'):
+                self.btn_sections_toggle.setText('Expand All' if any_collapsed else 'Collapse All')
             self._config_scroll.verticalScrollBar().setValue(0)
+        except Exception:
+            pass
+
+    def _toggle_all_sections(self):
+        # Decide based on current uniformity: if all expanded -> collapse; else expand
+        try:
+            all_expanded=all(b._toggle.isChecked() for b in self._sections)
+            if all_expanded:
+                self._collapse_all_sections()
+            else:
+                self._expand_all_sections()
         except Exception:
             pass
 
