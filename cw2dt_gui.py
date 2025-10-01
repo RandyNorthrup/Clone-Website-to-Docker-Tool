@@ -161,9 +161,12 @@ class DockerClonerGUI(QWidget):
         self.btn_cancel=QPushButton('Cancel'); self.btn_cancel.setEnabled(False); row1.addWidget(self.btn_cancel)
         row1.addStretch(1)
         row2=QHBoxLayout(); row2.setSpacing(6)
+        self.btn_wizard=QPushButton('Wizard'); row2.addWidget(self.btn_wizard)
         self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
         self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); row2.addWidget(self.btn_serve)
         self.btn_deps=QPushButton('Dependencies'); row2.addWidget(self.btn_deps)
+        self.btn_save_cfg=QPushButton('Save Config'); row2.addWidget(self.btn_save_cfg)
+        self.btn_load_cfg=QPushButton('Load Config'); row2.addWidget(self.btn_load_cfg)
         row2.addStretch(1)
         rv.addLayout(row1); rv.addLayout(row2)
         self.prog=QProgressBar(); self.prog.setRange(0,100); rv.addWidget(self.prog)
@@ -172,6 +175,9 @@ class DockerClonerGUI(QWidget):
         # Connections
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
+        self.btn_wizard.clicked.connect(self._run_wizard)
+        self.btn_save_cfg.clicked.connect(self._save_profile_dialog)
+        self.btn_load_cfg.clicked.connect(self._load_profile_dialog)
         self._load_history()
         bar=QHBoxLayout(); bar.setSpacing(12); self.status_lbl=QLabel('Ready.'); self.metric_lbl=QLabel(''); self.phase_time_lbl=QLabel(''); bar.addWidget(self.status_lbl,1); bar.addWidget(self.metric_lbl,2); bar.addWidget(self.phase_time_lbl,2); root.addLayout(bar)
         self._compute_and_lock_min_size()
@@ -195,6 +201,198 @@ class DockerClonerGUI(QWidget):
         if not is_wget2_available(): msgs.append('wget2 missing')
         if self.chk_build.isChecked() and not docker_available(): msgs.append('docker missing')
         if msgs: self.status_lbl.setText(' / '.join(msgs))
+
+    # ------------------- Profiles (Save / Load) -------------------
+    def _profiles_dir(self):
+        d=os.path.join(os.path.expanduser('~'), '.cw2dt_profiles')
+        try: os.makedirs(d, exist_ok=True)
+        except Exception: pass
+        return d
+    def _current_profile_dict(self):
+        return {
+            'url': self.url_in.text().strip(), 'dest': self.dest_in.text().strip(), 'docker_name': self.name_in.text().strip(),
+            'bind_ip': self.ip_in.text().strip(), 'host_port': self.host_port.value(), 'container_port': self.cont_port.value(),
+            'build': self.chk_build.isChecked(), 'run_built': self.chk_run_built.isChecked(), 'serve_folder': self.chk_serve.isChecked(),
+            'open_browser': self.chk_open_browser.isChecked(), 'incremental': self.chk_incremental.isChecked(), 'diff': self.chk_diff.isChecked(),
+            'estimate_first': self.chk_estimate_first.isChecked(), 'cleanup': self.chk_cleanup.isChecked(),
+            'prerender': self.chk_prerender.isChecked(), 'prerender_max_pages': self.spin_prer_pages.value(), 'capture_api': self.chk_capture_api.isChecked(), 'hook_script': self.hook_in.text().strip(),
+            'router_intercept': self.chk_router.isChecked(), 'router_include_hash': self.chk_route_hash.isChecked(), 'router_quiet': self.chk_router_quiet.isChecked(),
+            'router_max_routes': self.spin_router_max.value(), 'router_settle_ms': self.spin_router_settle.value(), 'router_wait_selector': self.router_wait_sel.text().strip(),
+            'router_allow': self.router_allow.text().strip(), 'router_deny': self.router_deny.text().strip(),
+            'checksums': self.chk_checksums.isChecked(), 'verify_after': self.chk_verify_after.isChecked(), 'verify_deep': self.chk_verify_deep.isChecked(), 'checksum_ext': self.checksum_ext.text().strip(),
+            'disable_js': self.chk_disable_js.isChecked(), 'size_cap': self.size_cap.text().strip(), 'throttle': self.throttle.text().strip(),
+            'auth_user': self.auth_user.text().strip(), 'auth_pass': self.auth_pass.text().strip(), 'cookies_file': self.cookies_file.text().strip(), 'import_browser_cookies': self.chk_import_browser_cookies.isChecked(),
+            'plugins_dir': self.plugins_dir.text().strip()
+        }
+    def _apply_profile_dict(self, data: dict):
+        try:
+            self.url_in.setText(data.get('url',''))
+            self.dest_in.setText(data.get('dest',''))
+            self.name_in.setText(data.get('docker_name',''))
+            self.ip_in.setText(data.get('bind_ip','127.0.0.1'))
+            self.host_port.setValue(int(data.get('host_port',8080)))
+            self.cont_port.setValue(int(data.get('container_port',80)))
+            self.chk_build.setChecked(bool(data.get('build')))
+            self.chk_run_built.setChecked(bool(data.get('run_built')))
+            self.chk_serve.setChecked(bool(data.get('serve_folder')))
+            self.chk_open_browser.setChecked(bool(data.get('open_browser')))
+            self.chk_incremental.setChecked(bool(data.get('incremental')))
+            self.chk_diff.setChecked(bool(data.get('diff')))
+            self.chk_estimate_first.setChecked(bool(data.get('estimate_first')))
+            self.chk_cleanup.setChecked(bool(data.get('cleanup')))
+            self.chk_prerender.setChecked(bool(data.get('prerender')))
+            self.spin_prer_pages.setValue(int(data.get('prerender_max_pages',40)))
+            self.chk_capture_api.setChecked(bool(data.get('capture_api')))
+            self.hook_in.setText(data.get('hook_script',''))
+            self.chk_router.setChecked(bool(data.get('router_intercept')))
+            self.chk_route_hash.setChecked(bool(data.get('router_include_hash')))
+            self.chk_router_quiet.setChecked(bool(data.get('router_quiet')))
+            self.spin_router_max.setValue(int(data.get('router_max_routes',200)))
+            self.spin_router_settle.setValue(int(data.get('router_settle_ms',350)))
+            self.router_wait_sel.setText(data.get('router_wait_selector',''))
+            self.router_allow.setText(data.get('router_allow',''))
+            self.router_deny.setText(data.get('router_deny',''))
+            self.chk_checksums.setChecked(bool(data.get('checksums')))
+            self.chk_verify_after.setChecked(bool(data.get('verify_after')))
+            self.chk_verify_deep.setChecked(bool(data.get('verify_deep')))
+            self.checksum_ext.setText(data.get('checksum_ext',''))
+            self.chk_disable_js.setChecked(bool(data.get('disable_js')))
+            self.size_cap.setText(data.get('size_cap',''))
+            self.throttle.setText(data.get('throttle',''))
+            self.auth_user.setText(data.get('auth_user',''))
+            self.auth_pass.setText(data.get('auth_pass',''))
+            self.cookies_file.setText(data.get('cookies_file',''))
+            self.chk_import_browser_cookies.setChecked(bool(data.get('import_browser_cookies')))
+            self.plugins_dir.setText(data.get('plugins_dir',''))
+        except Exception as e:
+            QMessageBox.warning(self,'Profile Load','Failed to apply profile: '+str(e))
+    def _save_profile_dialog(self):
+        from PySide6.QtWidgets import QInputDialog
+        prof=self._current_profile_dict()
+        suggested=self.name_in.text().strip() or 'profile'
+        name,ok=QInputDialog.getText(self,'Save Profile','Profile name:', text=suggested)
+        if not ok or not name.strip(): return
+        safe=re.sub(r'[^a-zA-Z0-9_.-]+','_', name.strip())
+        path=os.path.join(self._profiles_dir(), safe+'.json')
+        try:
+            import json
+            with open(path,'w',encoding='utf-8') as f: json.dump(prof,f,indent=2)
+            self._on_log(f"[profile] saved {path}")
+        except Exception as e:
+            QMessageBox.warning(self,'Save Failed', str(e))
+    def _load_profile_dialog(self):
+        d=self._profiles_dir()
+        files=[f for f in os.listdir(d) if f.endswith('.json')]
+        if not files:
+            QMessageBox.information(self,'Profiles','No profiles saved yet.')
+            return
+        from PySide6.QtWidgets import QInputDialog
+        name,ok=QInputDialog.getItem(self,'Load Profile','Select profile:', files, 0, False)
+        if not ok or not name: return
+        path=os.path.join(d,name)
+        try:
+            import json
+            data=json.load(open(path,'r',encoding='utf-8'))
+            self._apply_profile_dict(data)
+            self._on_log(f"[profile] loaded {name}")
+        except Exception as e:
+            QMessageBox.warning(self,'Load Failed', str(e))
+
+    # ------------------- Wizard (Recommendation) -------------------
+    def _scan_site_features(self, url: str, timeout: float=6.0) -> dict:
+        """Fetch root page and run lightweight heuristics to recommend settings.
+        Heuristics:
+          - Detect SPA / frameworks (react/vue/angular/next/nuxt) -> enable prerender + router intercept.
+          - Detect large script count (>15) -> recommend prerender (dynamic) OR suggest JS stripping (optional) if hardening.
+          - If inline JSON blobs / hydration markers found -> prerender.
+          - If page size < 35KB and few scripts -> static (no prerender needed).
+        """
+        import urllib.request, urllib.error
+        info={'fetched':False,'error':None,'size':0,'scripts':0,'frameworks':[], 'recommend':{}}
+        try:
+            req=urllib.request.Request(url, headers={'User-Agent':'cw2dt-wizard/1.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw=resp.read(250_000)  # cap at 250KB
+            info['fetched']=True; info['size']=len(raw)
+            try:
+                text=raw.decode('utf-8','ignore')
+            except Exception:
+                text=''
+            import re
+            script_tags=re.findall(r'<script\b', text, re.IGNORECASE)
+            info['scripts']=len(script_tags)
+            fw_patterns={
+                'react': r'react[^a-zA-Z0-9]|data-reactroot|__REACT_DEVTOOLS_GLOBAL_HOOK__',
+                'vue': r'vue(?:\.runtime)?\.js|__VUE_DEVTOOLS_GLOBAL_HOOK__',
+                'angular': r'ng-version="|angular[^a-zA-Z0-9]',
+                'nextjs': r'__NEXT_DATA__|next/dist',
+                'nuxt': r'__NUXT__',
+                'svelte': r'svelte[^a-zA-Z0-9]|data-svelte',
+            }
+            found=[]
+            for name,pat in fw_patterns.items():
+                if re.search(pat, text): found.append(name)
+            info['frameworks']=found
+            rec=info['recommend']
+            dynamic = bool(found) or (info['scripts']>15) or ('__NEXT_DATA__' in text or '__NUXT__' in text)
+            if dynamic:
+                rec['prerender']=True
+                if any(f in found for f in ('react','vue','nextjs','nuxt','angular','svelte')):
+                    rec['router_intercept']=True
+            if info['size']<35_000 and info['scripts']<=4 and not found:
+                rec['prerender']=False
+            # If many external scripts but no frameworks, still consider prerender
+            if info['scripts']>25 and not found:
+                rec['prerender']=True
+            return info
+        except Exception as e:
+            info['error']=str(e)
+            return info
+    def _run_wizard(self):
+        url=self.url_in.text().strip()
+        if not url:
+            QMessageBox.information(self,'Wizard','Enter a URL first.')
+            return
+        self.status_lbl.setText('Wizard scanning...'); self.repaint()
+        info=self._scan_site_features(url)
+        self.status_lbl.setText('Ready.')
+        # Build dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QCheckBox, QLabel
+        dlg=QDialog(self); dlg.setWindowTitle('Recommendation Wizard')
+        lay=QVBoxLayout(dlg)
+        if info.get('error'):
+            lay.addWidget(QLabel('Fetch error: '+info['error']))
+        else:
+            summary=f"Fetched {info['size']} bytes • scripts={info['scripts']} • frameworks={','.join(info['frameworks']) or 'none'}"
+            lay.addWidget(QLabel(summary))
+        # Proposed toggles with current state defaults OR recommendation
+        rec=info.get('recommend',{})
+        chk_prer=QCheckBox('Enable prerender'); chk_prer.setChecked(rec.get('prerender', self.chk_prerender.isChecked()))
+        chk_router=QCheckBox('Enable router interception'); chk_router.setChecked(rec.get('router_intercept', self.chk_router.isChecked()))
+        lay.addWidget(chk_prer); lay.addWidget(chk_router)
+        harden=QCheckBox('Strip JavaScript (offline harden)'); harden.setChecked(self.chk_disable_js.isChecked())
+        lay.addWidget(harden)
+        verify=QCheckBox('Enable checksums + verify'); verify.setChecked(self.chk_checksums.isChecked() or self.chk_verify_after.isChecked())
+        lay.addWidget(verify)
+        incremental=QCheckBox('Incremental + diff state'); incremental.setChecked(self.chk_incremental.isChecked() or self.chk_diff.isChecked())
+        lay.addWidget(incremental)
+        bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        lay.addWidget(bb)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        if dlg.exec()!=QDialog.DialogCode.Accepted:
+            return
+        # Apply selections
+        self.chk_prerender.setChecked(chk_prer.isChecked())
+        self.chk_router.setChecked(chk_router.isChecked())
+        if chk_router.isChecked():
+            # set allow hash if dynamic frameworks present
+            if info.get('frameworks'): self.chk_route_hash.setChecked(True)
+        self.chk_disable_js.setChecked(harden.isChecked())
+        self.chk_checksums.setChecked(verify.isChecked())
+        self.chk_verify_after.setChecked(verify.isChecked())
+        self.chk_incremental.setChecked(incremental.isChecked())
+        self.chk_diff.setChecked(incremental.isChecked())
+        self._on_log('[wizard] applied recommendations')
 
     def _build_config(self)->CloneConfig:
         cfg = CloneConfig(
