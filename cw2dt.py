@@ -2233,11 +2233,16 @@ class DockerClonerGUI(QWidget):
         self.verify_checksums_checkbox = QCheckBox("Verify after clone")
         self.verify_checksums_checkbox.setToolTip("After clone completes and checksums manifest is written, verify all recorded hashes.")
         self.verify_checksums_checkbox.setEnabled(True)
+        self.verify_fast_checkbox = QCheckBox("Fast verify (skip missing)")
+        self.verify_fast_checkbox.setToolTip("If enabled, missing files are reported quickly without hashing attempts (passes --fast-missing).")
+        self.verify_fast_checkbox.setChecked(True)
+        self.verify_fast_checkbox.setEnabled(False)
         self.checksum_extra_edit = QLineEdit(); self.checksum_extra_edit.setPlaceholderText("Extra checksum extensions (e.g. css,js)")
         integ_layout.addWidget(self.checksums_checkbox,0,0)
         integ_layout.addWidget(self.skip_manifest_checkbox,0,1)
         integ_layout.addWidget(self.verify_checksums_checkbox,0,2)
-        integ_layout.addWidget(self.checksum_extra_edit,1,0,1,3)
+        integ_layout.addWidget(self.verify_fast_checkbox,0,3)
+        integ_layout.addWidget(self.checksum_extra_edit,1,0,1,4)
         self.integrity_section = CollapsibleSection("Integrity & Artifacts", start_collapsed=True)
         self.integrity_section.setContentLayout(integ_layout)
         card_layout.addWidget(self.integrity_section)
@@ -2326,10 +2331,13 @@ class DockerClonerGUI(QWidget):
             pass
         self.console.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.right_col.addWidget(self.console, 1)
-        # Export log button row
+        # Export / Clear log button row
         export_row = QHBoxLayout()
         self.save_log_btn = QPushButton("Save Log…"); self.save_log_btn.setObjectName("ghostBtn"); self.save_log_btn.clicked.connect(self.save_console_log)
-        export_row.addWidget(self.save_log_btn); export_row.addStretch(1)
+        self.clear_log_btn = QPushButton("Clear Log"); self.clear_log_btn.setObjectName("ghostBtn"); self.clear_log_btn.clicked.connect(self.clear_console_log)
+        export_row.addWidget(self.save_log_btn)
+        export_row.addWidget(self.clear_log_btn)
+        export_row.addStretch(1)
         self.right_col.addLayout(export_row)
 
         # Total progress (compact line)
@@ -2349,6 +2357,11 @@ class DockerClonerGUI(QWidget):
         self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         # Shadow removed
         root.addWidget(self.status_label)
+        # Verification status badge (hidden until a verification runs)
+        self.verify_status_label = QLabel("")
+        self.verify_status_label.setVisible(False)
+        self.verify_status_label.setObjectName("verifyStatus")
+        root.addWidget(self.verify_status_label)
         # Base status text used for appending progress
         self._status_base_text = "No container running"
 
@@ -2379,12 +2392,44 @@ class DockerClonerGUI(QWidget):
         self._load_recent_urls()
         # Ensure left pane minimum width fits all content horizontally
         self._update_left_min_width()
+        # Hook verification enable logic
+        try:
+            self.verify_checksums_checkbox.stateChanged.connect(self._update_verify_state)
+            self.checksums_checkbox.stateChanged.connect(self._update_verify_state)
+            self.skip_manifest_checkbox.stateChanged.connect(self._update_verify_state)
+        except Exception:
+            pass
+        self._update_verify_state()
 
     def _set_scaled_margins(self, layout: QLayout | None, left, top, right, bottom):
         if layout is None:
             return
         s = self.ui_scale
         layout.setContentsMargins(int(left*s), int(top*s), int(right*s), int(bottom*s))
+
+    def _update_verify_state(self):
+        """Enable/disable verify controls based on checksum + manifest settings."""
+        try:
+            checksums_on = self.checksums_checkbox.isChecked()
+            skip_manifest = self.skip_manifest_checkbox.isChecked()
+            allow_verify = checksums_on and not skip_manifest
+            self.verify_checksums_checkbox.setEnabled(allow_verify)
+            if not allow_verify:
+                self.verify_checksums_checkbox.setChecked(False)
+            fast_enabled = allow_verify and self.verify_checksums_checkbox.isChecked()
+            self.verify_fast_checkbox.setEnabled(fast_enabled)
+            if not fast_enabled:
+                self.verify_fast_checkbox.setChecked(True)
+            if not self.verify_checksums_checkbox.isChecked():
+                self.verify_status_label.setVisible(False)
+        except Exception:
+            pass
+
+    def clear_console_log(self):
+        try:
+            self.console.clear()
+        except Exception:
+            pass
 
     def save_console_log(self):
         """Save the current console log to a user-chosen file."""
@@ -3022,13 +3067,118 @@ class DockerClonerGUI(QWidget):
                             self.console.append("[verify] Manifest not found; skipping verification")
                             return
                         self.console.append("[verify] Running checksum verification…")
-                        import subprocess, sys as _sys
-                        cmd = [_sys.executable, os.path.join(os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path, '--fast-missing']
+                        import subprocess, sys as _sys, re, json as _json
+                        fast = True
+                        try:
+                            if hasattr(self, 'verify_fast_checkbox') and self.verify_fast_checkbox.isEnabled():
+                                fast = self.verify_fast_checkbox.isChecked()
+                        except Exception:
+                            fast = True
+                        cmd = [_sys.executable, os.path.join(os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path]
+                        if fast:
+                            cmd.append('--fast-missing')
                         res = subprocess.run(cmd, capture_output=True, text=True)
                         if res.stdout:
                             for line in res.stdout.strip().splitlines():
                                 self.console.append(line)
-                        if res.returncode == 0:
+                        # Extract stats for badge/manifest
+                        ok = missing = mismatched = total = None
+                        try:
+                            import re as _re, json as _json
+                            summary_re = _re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
+                            for line in res.stdout.splitlines() if res.stdout else []:
+                                m = summary_re.search(line)
+                                if m:
+                                    ok, missing, mismatched, total = map(int, m.groups()); break
+                        except Exception:
+                            pass
+                        passed = (res.returncode == 0)
+                        # Badge
+                        try:
+                            if passed:
+                                self.verify_status_label.setText(f"VERIFY OK {ok}/{total if total is not None else ok}")
+                                self.verify_status_label.setStyleSheet("color:#0a750a;font-weight:600;")
+                            else:
+                                self.verify_status_label.setText("VERIFY FAIL")
+                                self.verify_status_label.setStyleSheet("color:#b00000;font-weight:600;")
+                            self.verify_status_label.setVisible(True)
+                        except Exception:
+                            pass
+                        # Manifest update
+                        try:
+                            with open(manifest_path,'r',encoding='utf-8') as _mf:
+                                _data=_json.load(_mf)
+                            _data['verification']={
+                                'status':'passed' if passed else 'failed',
+                                'ok':ok,'missing':missing,'mismatched':mismatched,'total':total,'fast_missing':fast
+                            }
+                            with open(manifest_path,'w',encoding='utf-8') as _mf:
+                                _json.dump(_data,_mf,indent=2)
+                        except Exception:
+                            pass
+                        # README append
+                        try:
+                            dn=(self.docker_name_input.text().strip() or 'site').strip()
+                            readme_path=os.path.join(self.last_project_dir or '',f"README_{dn}.md")
+                            if os.path.exists(readme_path):
+                                with open(readme_path,'a',encoding='utf-8') as rf:
+                                    rf.write("\n### Verification Result\n")
+                                    if passed:
+                                        rf.write(f"Passed ({ok}/{total} files)\n")
+                                    else:
+                                        rf.write(f"Failed (ok={ok} missing={missing} mismatched={mismatched} total={total})\n")
+                        except Exception:
+                            pass
+                        if passed:
+                            self.console.append("[verify] PASSED")
+                        else:
+                            self.console.append("[verify] FAILED (see above)")
+                        # Parse summary line for stats
+                        ok = missing = mismatched = total = None
+                        summary_re = re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
+                        for line in res.stdout.splitlines() if res.stdout else []:
+                            m = summary_re.search(line)
+                            if m:
+                                ok, missing, mismatched, total = map(int, m.groups()); break
+                        passed = (res.returncode == 0)
+                        # Update verification badge
+                        try:
+                            if passed:
+                                self.verify_status_label.setText(f"VERIFY OK {ok}/{total if total is not None else ok}")
+                                self.verify_status_label.setStyleSheet("color:#0a750a;font-weight:600;")
+                            else:
+                                self.verify_status_label.setText("VERIFY FAIL")
+                                self.verify_status_label.setStyleSheet("color:#b00000;font-weight:600;")
+                            self.verify_status_label.setVisible(True)
+                        except Exception:
+                            pass
+                        # Update manifest JSON
+                        try:
+                            with open(manifest_path,'r',encoding='utf-8') as mf:
+                                data=_json.load(mf)
+                            data['verification'] = {
+                                'status': 'passed' if passed else 'failed',
+                                'ok': ok, 'missing': missing, 'mismatched': mismatched, 'total': total,
+                                'fast_missing': fast
+                            }
+                            with open(manifest_path,'w',encoding='utf-8') as mf:
+                                _json.dump(data, mf, indent=2)
+                        except Exception:
+                            pass
+                        # Append README summary if present
+                        try:
+                            dn = (self.docker_name_input.text().strip() or 'site').strip()
+                            readme_path = os.path.join(self.last_project_dir or '', f"README_{dn}.md")
+                            if os.path.exists(readme_path):
+                                with open(readme_path,'a',encoding='utf-8') as rf:
+                                    rf.write("\n### Verification Result\n")
+                                    if passed:
+                                        rf.write(f"Passed ({ok}/{total} files)\n")
+                                    else:
+                                        rf.write(f"Failed (ok={ok} missing={missing} mismatched={mismatched} total={total})\n")
+                        except Exception:
+                            pass
+                        if passed:
                             self.console.append("[verify] PASSED")
                         else:
                             self.console.append("[verify] FAILED (see above)")
