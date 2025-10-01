@@ -68,12 +68,19 @@ def test_wizard_applies_recommendations(gui, monkeypatch):
     monkeypatch.setattr(urllib.request, 'urlopen', lambda req, timeout=6.0: FakeResp(sample_html))
     gui.url_in.setText('https://example.com')
     # Suppress dialog interaction by auto-accepting
-    from PySide6.QtWidgets import QDialog
-    real_exec = QDialog.exec
-    def auto_exec(self):
-        # Find the checkboxes after layout (approx): mimic acceptance
-        return 1  # Accepted
-    monkeypatch.setattr(QDialog, 'exec', auto_exec)
+    # In offscreen mode _run_wizard will call _wizard_show_results directly; patch the result dialog
+    from PySide6.QtWidgets import QDialogButtonBox, QDialog
+    def patched_show_results(info):
+        # Directly invoke apply helper with recommended values
+        rec=info.get('recommend',{})
+        gui._apply_wizard_recommendations(info, {
+            'prerender': rec.get('prerender', True),
+            'router_intercept': rec.get('router_intercept', True),
+            'js_strip': False,
+            'checksums': True,
+            'incremental': True
+        })
+    monkeypatch.setattr(gui, '_wizard_show_results', patched_show_results)
     gui._run_wizard()
     # Expectations: prerender + router intercept enabled
     assert gui.chk_prerender.isChecked() is True

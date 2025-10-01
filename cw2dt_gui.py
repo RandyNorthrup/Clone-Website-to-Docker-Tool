@@ -349,50 +349,110 @@ class DockerClonerGUI(QWidget):
             info['error']=str(e)
             return info
     def _run_wizard(self):
+        """Two-phase wizard: (1) Scan (dry-run heuristics) (2) Results with Apply/Cancel.
+        If running in offscreen test mode, run synchronously for deterministic tests."""
         url=self.url_in.text().strip()
         if not url:
             QMessageBox.information(self,'Wizard','Enter a URL first.')
             return
-        self.status_lbl.setText('Wizard scanning...'); self.repaint()
-        info=self._scan_site_features(url)
-        self.status_lbl.setText('Ready.')
-        # Build dialog
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QCheckBox, QLabel
-        dlg=QDialog(self); dlg.setWindowTitle('Recommendation Wizard')
+        # Inner function to gather extended analysis (can be moved to thread)
+        def _extended_analysis(u: str):
+            info=self._scan_site_features(u)
+            # Add spider estimate (best effort)
+            try:
+                from cw2dt_core import estimate_site_items
+                info['estimated_items']=estimate_site_items(u)
+            except Exception:
+                info['estimated_items']=None
+            # Heuristic reasons
+            reasons=[]
+            if info.get('frameworks'): reasons.append('Framework(s): '+','.join(info['frameworks']))
+            if info.get('scripts',0)>25: reasons.append('Heavy script usage')
+            if info.get('scripts',0)<=4 and not info.get('frameworks'): reasons.append('Likely static (few scripts)')
+            if info.get('size',0)<35_000: reasons.append('Small initial payload (<35KB)')
+            info['reasons']=reasons
+            return info
+        # Offscreen test short-circuit
+        if os.environ.get('QT_QPA_PLATFORM')=='offscreen':
+            info=_extended_analysis(url)
+            self._wizard_show_results(info)
+            return
+        # Build scanning dialog with progress (indeterminate)
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
+        scan_dlg=QDialog(self); scan_dlg.setWindowTitle('Wizard – Scanning')
+        v=QVBoxLayout(scan_dlg)
+        lbl=L=QLabel(f'Scanning {url}\nFetching & analyzing...'); v.addWidget(lbl)
+        bar=QProgressBar(); bar.setRange(0,0); v.addWidget(bar)
+        scan_dlg.setModal(True)
+        # Use a worker thread
+        from PySide6.QtCore import QThread, Signal, QObject
+        class _ScanWorker(QObject):
+            finished=Signal(dict)
+            def run(self):
+                data=_extended_analysis(url)
+                self.finished.emit(data)
+        worker=_ScanWorker(); thread=QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        def _done(data):
+            scan_dlg.accept()
+            thread.quit(); thread.wait(50)
+            self._wizard_show_results(data)
+        worker.finished.connect(_done)
+        thread.start()
+        scan_dlg.exec()
+
+    def _apply_wizard_recommendations(self, info: dict, chk_states: dict):
+        # chk_states contains final user-selected booleans for recs
+        if chk_states.get('prerender') is not None:
+            self.chk_prerender.setChecked(chk_states['prerender'])
+        if chk_states.get('router_intercept') is not None:
+            self.chk_router.setChecked(chk_states['router_intercept'])
+            if chk_states['router_intercept'] and info.get('frameworks'):
+                self.chk_route_hash.setChecked(True)
+        if chk_states.get('js_strip') is not None:
+            self.chk_disable_js.setChecked(chk_states['js_strip'])
+        if chk_states.get('checksums') is not None:
+            self.chk_checksums.setChecked(chk_states['checksums'])
+            self.chk_verify_after.setChecked(chk_states['checksums'])
+        if chk_states.get('incremental') is not None:
+            self.chk_incremental.setChecked(chk_states['incremental'])
+            self.chk_diff.setChecked(chk_states['incremental'])
+        self._on_log('[wizard] applied recommendations')
+
+    def _wizard_show_results(self, info: dict):
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QCheckBox, QHBoxLayout, QFrame
+        dlg=QDialog(self); dlg.setWindowTitle('Wizard – Results')
         lay=QVBoxLayout(dlg)
         if info.get('error'):
             lay.addWidget(QLabel('Fetch error: '+info['error']))
         else:
             summary=f"Fetched {info['size']} bytes • scripts={info['scripts']} • frameworks={','.join(info['frameworks']) or 'none'}"
+            if info.get('estimated_items') is not None:
+                summary += f" • est items={info['estimated_items']}"
             lay.addWidget(QLabel(summary))
-        # Proposed toggles with current state defaults OR recommendation
+            if info.get('reasons'):
+                lay.addWidget(QLabel('Heuristics: '+ '; '.join(info['reasons'])))
         rec=info.get('recommend',{})
-        chk_prer=QCheckBox('Enable prerender'); chk_prer.setChecked(rec.get('prerender', self.chk_prerender.isChecked()))
-        chk_router=QCheckBox('Enable router interception'); chk_router.setChecked(rec.get('router_intercept', self.chk_router.isChecked()))
-        lay.addWidget(chk_prer); lay.addWidget(chk_router)
-        harden=QCheckBox('Strip JavaScript (offline harden)'); harden.setChecked(self.chk_disable_js.isChecked())
-        lay.addWidget(harden)
-        verify=QCheckBox('Enable checksums + verify'); verify.setChecked(self.chk_checksums.isChecked() or self.chk_verify_after.isChecked())
-        lay.addWidget(verify)
-        incremental=QCheckBox('Incremental + diff state'); incremental.setChecked(self.chk_incremental.isChecked() or self.chk_diff.isChecked())
-        lay.addWidget(incremental)
-        bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        # Checkbox panel
+        chk_prer=QCheckBox('Enable prerender (dynamic rendering)'); chk_prer.setChecked(rec.get('prerender', self.chk_prerender.isChecked()))
+        chk_router=QCheckBox('Enable router interception (SPA routes)'); chk_router.setChecked(rec.get('router_intercept', self.chk_router.isChecked()))
+        chk_js=QCheckBox('Strip JavaScript (harden output)'); chk_js.setChecked(self.chk_disable_js.isChecked())
+        chk_checksums=QCheckBox('Checksums + verify integrity'); chk_checksums.setChecked(self.chk_checksums.isChecked() or self.chk_verify_after.isChecked())
+        chk_incremental=QCheckBox('Incremental + diff state tracking'); chk_incremental.setChecked(self.chk_incremental.isChecked() or self.chk_diff.isChecked())
+        for w in (chk_prer, chk_router, chk_js, chk_checksums, chk_incremental): lay.addWidget(w)
+        sep=QFrame(); sep.setFrameShape(QFrame.Shape.HLine); lay.addWidget(sep)
+        bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
         lay.addWidget(bb)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
-        if dlg.exec()!=QDialog.DialogCode.Accepted:
-            return
-        # Apply selections
-        self.chk_prerender.setChecked(chk_prer.isChecked())
-        self.chk_router.setChecked(chk_router.isChecked())
-        if chk_router.isChecked():
-            # set allow hash if dynamic frameworks present
-            if info.get('frameworks'): self.chk_route_hash.setChecked(True)
-        self.chk_disable_js.setChecked(harden.isChecked())
-        self.chk_checksums.setChecked(verify.isChecked())
-        self.chk_verify_after.setChecked(verify.isChecked())
-        self.chk_incremental.setChecked(incremental.isChecked())
-        self.chk_diff.setChecked(incremental.isChecked())
-        self._on_log('[wizard] applied recommendations')
+        applied={'done':False}
+        def _apply():
+            chk={'prerender':chk_prer.isChecked(),'router_intercept':chk_router.isChecked(),'js_strip':chk_js.isChecked(),'checksums':chk_checksums.isChecked(),'incremental':chk_incremental.isChecked()}
+            self._apply_wizard_recommendations(info, chk)
+            applied['done']=True
+        bb.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(_apply)
+        bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(_apply)
+        dlg.exec()
 
     def _build_config(self)->CloneConfig:
         cfg = CloneConfig(
