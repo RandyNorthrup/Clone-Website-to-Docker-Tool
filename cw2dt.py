@@ -19,55 +19,44 @@ DEFAULT_HOST_PORT = 8080
 # ---- verification helpers (shared GUI + headless) ----
 def parse_verification_summary(text: str):
     """Parse verification stdout summary lines into a dict.
-    Expected summary token pattern: OK=\\d+ Missing=\\d+ Mismatched=\\d+ Total=\\d+
-    Returns dict with keys ok, missing, mismatched, total when found; values may be None if parsing fails.
+    Pattern: OK=\\d+ Missing=\\d+ Mismatched=\\d+ Total=\\d+
     """
     if not text:
-        return { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
+        return {'ok':None,'missing':None,'mismatched':None,'total':None}
     import re
-    summary_re = re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
+    m_re = re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
     for line in text.splitlines():
-        m = summary_re.search(line)
+        m = m_re.search(line)
         if m:
             ok, missing, mismatched, total = map(int, m.groups())
-            return { 'ok': ok, 'missing': missing, 'mismatched': mismatched, 'total': total }
-    return { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
+            return {'ok':ok,'missing':missing,'mismatched':mismatched,'total':total}
+    return {'ok':None,'missing':None,'mismatched':None,'total':None}
 
-def run_verification(manifest_path: str, fast: bool = True, docker_name: str | None = None, project_dir: str | None = None, readme: bool = True, output_cb=None):
+def run_verification(manifest_path: str, fast: bool=True, docker_name: str|None=None, project_dir: str|None=None, readme: bool=True, output_cb=None):
     import json, subprocess as _sp, sys as _sys, os as _os
     if not manifest_path or not _os.path.exists(manifest_path):
-        return False, { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
-    cmd = [_sys.executable, _os.path.join(_os.path.dirname(__file__), 'verify_checksums.py'), '--manifest', manifest_path]
+        return False, {'ok':None,'missing':None,'mismatched':None,'total':None}
+    cmd=[_sys.executable,_os.path.join(_os.path.dirname(__file__),'verify_checksums.py'),'--manifest',manifest_path]
     if fast:
         cmd.append('--fast-missing')
     try:
-        res = _sp.run(cmd, capture_output=True, text=True)
+        res=_sp.run(cmd,capture_output=True,text=True)
     except Exception as e:
-        if output_cb:
-            output_cb(f"[verify] error launching verifier: {e}")
-        return False, { 'ok': None, 'missing': None, 'mismatched': None, 'total': None }
+        if output_cb: output_cb(f"[verify] error launching verifier: {e}");
+        return False, {'ok':None,'missing':None,'mismatched':None,'total':None}
     if res.stdout and output_cb:
-        for line in res.stdout.splitlines():
-            output_cb(line)
-    stats = parse_verification_summary(res.stdout or '')
-    passed = (res.returncode == 0)
-    # Update manifest
+        for line in res.stdout.splitlines(): output_cb(line)
+    stats=parse_verification_summary(res.stdout or '')
+    passed = (res.returncode==0)
+    # manifest enrich
     try:
-        with open(manifest_path,'r',encoding='utf-8') as mf:
-            data = json.load(mf)
-        data['verification'] = {
-            'status':'passed' if passed else 'failed',
-            'ok': stats['ok'], 'missing': stats['missing'], 'mismatched': stats['mismatched'], 'total': stats['total'],
-            'fast_missing': fast
-        }
-        with open(manifest_path,'w',encoding='utf-8') as mf:
-            json.dump(data, mf, indent=2)
-    except Exception:
-        pass
-    # README
+        with open(manifest_path,'r',encoding='utf-8') as mf: data=json.load(mf)
+        data['verification']={'status':'passed' if passed else 'failed','ok':stats['ok'],'missing':stats['missing'],'mismatched':stats['mismatched'],'total':stats['total'],'fast_missing':fast}
+        with open(manifest_path,'w',encoding='utf-8') as mf: json.dump(data,mf,indent=2)
+    except Exception: pass
     if readme and docker_name and project_dir:
         try:
-            rd = os.path.join(project_dir, f"README_{docker_name}.md")
+            rd=os.path.join(project_dir,f"README_{docker_name}.md")
             if os.path.exists(rd):
                 with open(rd,'a',encoding='utf-8') as rf:
                     rf.write("\n### Verification Result\n")
@@ -77,25 +66,10 @@ def run_verification(manifest_path: str, fast: bool = True, docker_name: str | N
                         rf.write("Passed\n")
                     else:
                         rf.write(f"Failed (ok={stats['ok']} missing={stats['missing']} mismatched={stats['mismatched']} total={stats['total']})\n")
-        except Exception:
-            pass
+        except Exception: pass
     return passed, stats
 
-# (reinsert lost basic helpers)
-PARTIAL_SUFFIXES = {".tmp", ".part", ".partial", ".download"}
-def count_files_and_partials(base_path: str):
-    total = 0; partials = 0
-    if not base_path or not os.path.isdir(base_path):
-        return 0,0
-    for root, dirs, files in os.walk(base_path):
-        for f in files:
-            total += 1
-            lf = f.lower()
-            for suf in PARTIAL_SUFFIXES:
-                if lf.endswith(suf):
-                    partials += 1; break
-    return total, partials
-
+# Reintroduce basic helpers (some code below references these)
 def is_wget2_available():
     try:
         subprocess.run(["wget2","--version"], capture_output=True, check=True)
@@ -103,36 +77,50 @@ def is_wget2_available():
     except Exception:
         return False
 
+PARTIAL_SUFFIXES = {".tmp", ".part", ".partial", ".download"}
+def count_files_and_partials(base_path: str):
+    total=0; partials=0
+    if not base_path or not os.path.isdir(base_path):
+        return 0,0
+    for root, _, files in os.walk(base_path):
+        for f in files:
+            total +=1
+            lf=f.lower()
+            for suf in PARTIAL_SUFFIXES:
+                if lf.endswith(suf):
+                    partials +=1; break
+    return total, partials
+
 def get_install_cmd(program: str):
-    mgrs_linux = ["apt-get","apt","dnf","yum","pacman","zypper","apk"]
-    os_name = platform.system()
-    if os_name == "Darwin":
+    mgrs_linux=["apt-get","apt","dnf","yum","pacman","zypper","apk"]
+    os_name=platform.system()
+    if os_name=="Darwin":
         if shutil.which("brew"):
-            if program == "wget2": return ["brew","install","wget2"]
-            if program == "docker": return ["brew","install","--cask","docker"]
+            if program=="wget2": return ["brew","install","wget2"]
+            if program=="docker": return ["brew","install","--cask","docker"]
         return None
-    if os_name == "Linux":
+    if os_name=="Linux":
         for mgr in mgrs_linux:
             if not shutil.which(mgr): continue
-            if program == "wget2":
+            if program=="wget2":
                 if mgr in ("apt-get","apt"): return ["sudo",mgr,"install","-y","wget2"]
                 if mgr in ("dnf","yum"): return ["sudo",mgr,"install","-y","wget2"]
-                if mgr == "pacman": return ["sudo","pacman","-S","--noconfirm","wget2"]
-                if mgr == "zypper": return ["sudo","zypper","install","-y","wget2"]
-                if mgr == "apk": return ["sudo","apk","add","wget2"]
-            if program == "docker":
+                if mgr=="pacman": return ["sudo","pacman","-S","--noconfirm","wget2"]
+                if mgr=="zypper": return ["sudo","zypper","install","-y","wget2"]
+                if mgr=="apk": return ["sudo","apk","add","wget2"]
+            if program=="docker":
                 if mgr in ("apt-get","apt"): return ["sudo",mgr,"install","-y","docker.io"]
                 if mgr in ("dnf","yum"): return ["sudo",mgr,"install","-y","docker"]
-                if mgr == "pacman": return ["sudo","pacman","-S","--noconfirm","docker"]
-                if mgr == "zypper": return ["sudo","zypper","install","-y","docker"]
-                if mgr == "apk": return ["sudo","apk","add","docker"]
+                if mgr=="pacman": return ["sudo","pacman","-S","--noconfirm","docker"]
+                if mgr=="zypper": return ["sudo","zypper","install","-y","docker"]
+                if mgr=="apk": return ["sudo","apk","add","docker"]
         return None
-    if os_name == "Windows":
-        if program == "wget2":
+    if os_name=="Windows":
+        if program=="wget2":
             return None
-        if shutil.which("winget") and program == "docker":
+        if shutil.which("winget") and program=="docker":
             return ["winget","install","-e","--id","Docker.DockerDesktop"]
-        if shutil.which("choco") and program == "docker":
+        if shutil.which("choco") and program=="docker":
             return ["choco","install","docker-desktop","-y"]
         return None
     return None
