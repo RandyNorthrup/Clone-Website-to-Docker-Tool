@@ -135,6 +135,120 @@ def run_verification(manifest_path: str, fast: bool=True, docker_name: str|None=
             pass
     return passed, stats
 
+# ---- configuration / incremental / diff helpers (headless + future GUI integration) ----
+def _load_config_file(path: str) -> dict:
+    """Load a configuration file (JSON or YAML) returning a flat dict of option -> value.
+    YAML support is optional (requires PyYAML). Falls back to JSON.
+    """
+    import json, os as _os
+    if not path or not _os.path.exists(path):
+        return {}
+    try:
+        if path.lower().endswith(('.yml', '.yaml')):
+            try:
+                import yaml  # type: ignore
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f) or {}
+                if isinstance(data, dict):
+                    return data
+                return {}
+            except Exception:
+                pass  # fall through to JSON attempt
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _ensure_state_dir(output_folder: str) -> str:
+    state_dir = os.path.join(output_folder, '.cw2dt')
+    try: os.makedirs(state_dir, exist_ok=True)
+    except Exception: pass
+    return state_dir
+
+def _state_path(output_folder: str) -> str:
+    return os.path.join(_ensure_state_dir(output_folder), 'state.json')
+
+def _load_state(output_folder: str) -> dict:
+    import json
+    p = _state_path(output_folder)
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _save_state(output_folder: str, state: dict):
+    import json
+    p = _state_path(output_folder)
+    try:
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+def _snapshot_file_hashes(base: str, extra_ext: list[str] | None = None) -> dict:
+    """Compute sha256 for files considered interesting for diffing.
+    Uses same extension heuristic as checksum helper (HTML + optional extras).
+    """
+    import hashlib
+    exts = set(e.lower().lstrip('.') for e in (extra_ext or []))
+    result = {}
+    for root, _, files in os.walk(base):
+        for fn in files:
+            low = fn.lower()
+            include = (low.endswith(('.html', '.htm')) or any(low.endswith('.'+e) for e in exts))
+            if not include:
+                continue
+            p = os.path.join(root, fn)
+            rel = os.path.relpath(p, base)
+            try:
+                h = hashlib.sha256()
+                with open(p, 'rb') as f:
+                    for chunk in iter(lambda: f.read(65536), b''):
+                        h.update(chunk)
+                st = os.stat(p)
+                result[rel] = {
+                    'sha256': h.hexdigest(),
+                    'size': st.st_size,
+                    'mtime': int(st.st_mtime)
+                }
+            except Exception:
+                continue
+    return result
+
+def _compute_diff(prev: dict, curr: dict) -> dict:
+    prev_files = prev.get('files', {}) if isinstance(prev, dict) else {}
+    curr_files = curr.get('files', {}) if isinstance(curr, dict) else {}
+    added = [p for p in curr_files.keys() if p not in prev_files]
+    removed = [p for p in prev_files.keys() if p not in curr_files]
+    modified = []
+    unchanged = 0
+    for p, meta in curr_files.items():
+        if p in prev_files:
+            if prev_files[p].get('sha256') != meta.get('sha256'):
+                modified.append({
+                    'path': p,
+                    'old_hash': prev_files[p].get('sha256'),
+                    'new_hash': meta.get('sha256'),
+                    'old_size': prev_files[p].get('size'),
+                    'new_size': meta.get('size'),
+                    'delta_bytes': (meta.get('size') or 0) - (prev_files[p].get('size') or 0)
+                })
+            else:
+                unchanged += 1
+    return {
+        'added': added,
+        'removed': removed,
+        'modified': modified,
+        'unchanged_count': unchanged,
+        'total_current': len(curr_files)
+    }
+
+def _timestamp():
+    return datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+
 # ---- checksum helper (shared headless + GUI thread) ----
 def compute_checksums(base_folder: str, extra_extensions: list[str] | None = None, progress_cb=None, chunk_size: int = 65536):
     """Compute SHA256 checksums for HTML/HTM, API JSON under _api/, and optional extra extensions.
@@ -608,9 +722,30 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--verify-deep', action='store_true', help='Deep verification (do not skip missing)')
     parser.add_argument('--verify-fast', action='store_true', help='Alias of --verify-after (fast mode)')
     parser.add_argument('--selftest-verification', action='store_true', help='Run internal verification parsing self-test and exit')
+    # New advanced / roadmap flags
+    parser.add_argument('--config', default=None, help='Optional config file (JSON or YAML) to preload options')
+    parser.add_argument('--incremental', action='store_true', help='Enable conditional fetching (passes -N to wget2) and store state for future diffs')
+    parser.add_argument('--diff-latest', action='store_true', help='After clone produce diff report vs last stored state')
+    parser.add_argument('--json-logs', action='store_true', help='Emit machine-readable JSON log lines for events')
+    parser.add_argument('--plugins-dir', default=None, help='Directory containing plugin .py files with hook functions (pre_download, post_asset, finalize)')
     parser.add_argument('--profile', action='store_true', help='Emit simple JSON with elapsed phase timing metrics at end')
 
     args = parser.parse_args(argv)
+
+    # Config file merge (config provides defaults; CLI overrides)
+    if args.config:
+        cfg = _load_config_file(args.config)
+        if cfg:
+            # Only set attributes that user did not specify (heuristic: attribute still default)
+            for k, v in cfg.items():
+                if not hasattr(args, k):
+                    continue
+                current = getattr(args, k)
+                # Avoid overriding explicit booleans: if current is False but config says True and user didn't pass flag—still allow upgrade.
+                # Simplistic approach: override only if current in (None, '', 0) or False and config True.
+                if current in (None, '', 0) or (current is False and v is True):
+                    try: setattr(args, k, v)
+                    except Exception: pass
 
     if args.selftest_verification:
         _selftest_verification_parsing(); return 0
@@ -641,6 +776,8 @@ def headless_main(argv: list[str]) -> int:
         '--page-requisites','--no-parent','--continue','--progress=dot:mega',
         args.url,'-P', output_folder
     ]
+    if args.incremental:
+        wget_cmd.append('-N')  # timestamping to skip unchanged remote resources
     if args.jobs and args.jobs > 1:
         wget_cmd += ['-j', str(int(args.jobs))]
     if args.size_cap:
@@ -856,6 +993,118 @@ def headless_main(argv: list[str]) -> int:
             webbrowser.open(url_out)
         except Exception:
             pass
+
+    # --- Incremental state + diff handling ---
+    diff_summary = None
+    try:
+        site_root = find_site_root(output_folder)
+        if args.incremental or args.diff_latest:
+            prev_state = _load_state(output_folder)
+            files_snap = _snapshot_file_hashes(site_root)
+            current_state = {
+                'schema': 1,
+                'timestamp': _timestamp(),
+                'files': files_snap
+            }
+            # Save current state for next run
+            _save_state(output_folder, current_state)
+            if args.diff_latest and prev_state:
+                diff_summary = _compute_diff(prev_state, current_state)
+                diff_path = os.path.join(_ensure_state_dir(output_folder), f'diff_{current_state["timestamp"]}.json')
+                try:
+                    import json
+                    with open(diff_path, 'w', encoding='utf-8') as df:
+                        json.dump({'schema':1,'generated':current_state['timestamp'],'diff':diff_summary}, df, indent=2)
+                    print(f"[diff] Wrote diff report: {diff_path}")
+                except Exception:
+                    pass
+                # Human summary
+                print(f"[diff] added={len(diff_summary['added'])} removed={len(diff_summary['removed'])} modified={len(diff_summary['modified'])} unchanged={diff_summary['unchanged_count']}")
+    except Exception as e:
+        print(f"[warn] Incremental state/diff step failed: {e}")
+
+    # --- Plugin post_asset + finalize ---
+    try:
+        plugins_dir = args.plugins_dir
+        plugins = []
+        if plugins_dir and os.path.isdir(plugins_dir):
+            for fn in os.listdir(plugins_dir):
+                if fn.endswith('.py'):
+                    path = os.path.join(plugins_dir, fn)
+                    mod_name = f"_cw2dt_plugin_{fn[:-3]}"
+                    try:
+                        import importlib.util
+                        spec = importlib.util.spec_from_file_location(mod_name, path)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            plugins.append(mod)
+                            if args.json_logs:
+                                print('{"event":"plugin_loaded","name":"'+fn+'"}')
+                            else:
+                                print(f"[plugin] loaded {fn}")
+                    except Exception as e:
+                        print(f"[plugin] failed {fn}: {e}")
+        # post_asset hooks
+        if plugins:
+            site_root = find_site_root(output_folder)
+            for root, _, files in os.walk(site_root):
+                for fn in files:
+                    p = os.path.join(root, fn)
+                    rel = os.path.relpath(p, site_root)
+                    # Only process plausible text assets (html, css, js)
+                    if not fn.lower().endswith(('.html', '.htm', '.css', '.js')):
+                        continue
+                    try:
+                        with open(p, 'rb') as f: data = f.read()
+                        original = data
+                        for mod in plugins:
+                            hook = getattr(mod, 'post_asset', None)
+                            if callable(hook):
+                                try:
+                                    maybe = hook(rel, data, {'output_folder': output_folder})
+                                    if maybe is not None:
+                                        if isinstance(maybe, str):
+                                            data = maybe.encode('utf-8', errors='replace')
+                                        elif isinstance(maybe, bytes):
+                                            data = maybe
+                                except Exception:
+                                    pass
+                        if data != original and isinstance(data, (bytes, bytearray)):
+                            with open(p, 'wb') as f: f.write(data)
+                            if args.json_logs:
+                                print('{"event":"post_asset_modified","path":"'+rel+'"}')
+                            else:
+                                print(f"[plugin] modified {rel}")
+                    except Exception:
+                        continue
+        # finalize hooks
+        if plugins:
+            manifest_path = os.path.join(output_folder, 'clone_manifest.json')
+            manifest_data = None
+            if os.path.exists(manifest_path):
+                import json
+                try:
+                    with open(manifest_path,'r',encoding='utf-8') as mf:
+                        manifest_data = json.load(mf)
+                except Exception:
+                    manifest_data = {}
+            for mod in plugins:
+                fin = getattr(mod, 'finalize', None)
+                if callable(fin):
+                    try:
+                        fin(output_folder, manifest_data, {'output_folder': output_folder, 'diff': diff_summary})
+                    except Exception:
+                        pass
+            if manifest_data is not None:
+                try:
+                    import json
+                    with open(manifest_path,'w',encoding='utf-8') as mf:
+                        json.dump(manifest_data, mf, indent=2)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[plugin] error: {e}")
 
     # Write README with headless examples (appends existing content later in code)
     if args.profile:
