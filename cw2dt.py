@@ -182,6 +182,234 @@ def parse_rate_to_bps(text: str) -> int | None:
     # Accept e.g., 500K, 2M (bytes/sec like wget2 expects)
     return parse_size_to_bytes(text)
 
+# ---------- enhanced compatibility (optional prerender) ----------
+def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages: int = 40,
+                   capture_api: bool = False, hook_script: str | None = None,
+                   rewrite_urls: bool = True, progress_cb=None, progress_percent_cb=None,
+                   api_capture_cb=None,
+                   router_intercept: bool = False, router_include_hash: bool = False,
+                   router_max_routes: int = 200, router_settle_ms: int = 350,
+                   router_wait_selector: str | None = None,
+                   router_allow: list[str] | None = None,
+                   router_deny: list[str] | None = None,
+                   router_route_cb=None,
+                   router_quiet: bool = False):
+    """Use Playwright (if installed) to prerender dynamic pages and optionally capture API responses.
+    - Saves rendered HTML into existing mirrored files if present, or creates them if missing.
+    - Captures JSON/XHR responses into _api/ folder preserving path structure.
+    - Optional user hook script can mutate the page before HTML extraction.
+    This function is best-effort and silently returns if Playwright is not available.
+    """
+    def emit(msg):
+        if progress_cb:
+            try: progress_cb(msg)
+            except Exception: pass
+        else:
+            print(f"[prerender] {msg}")
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        emit("Playwright not installed; skipping prerender.")
+        return
+    hook_fn = None
+    if hook_script and os.path.exists(hook_script):
+        try:
+            import runpy
+            mod = runpy.run_path(hook_script)
+            hook_fn = mod.get('on_page')
+            if hook_fn:
+                emit("Loaded hook on_page()")
+        except Exception as e:
+            emit(f"Hook load failed: {e}")
+    visited = set()
+    to_visit = [start_url]
+    router_seen = set()
+    api_dir = os.path.join(output_folder, '_api') if capture_api else None
+    if api_dir:
+        os.makedirs(api_dir, exist_ok=True)
+    from urllib.parse import urlparse, urljoin
+    origin = None
+    try:
+        origin_parts = urlparse(start_url)
+        origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
+    except Exception:
+        origin = None
+    import re
+    allow_res = [re.compile(pat) for pat in (router_allow or [])]
+    deny_res = [re.compile(pat) for pat in (router_deny or [])]
+    def _route_allowed(norm: str) -> bool:
+        try:
+            if allow_res and not any(r.search(norm) for r in allow_res):
+                return False
+            if deny_res and any(r.search(norm) for r in deny_res):
+                return False
+            return True
+        except Exception:
+            return False
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        captured = []
+        if capture_api:
+            def on_response(resp):
+                try:
+                    ct = resp.headers.get('content-type','')
+                    if 'application/json' in ct:
+                        urlp = urlparse(resp.url)
+                        path = urlp.path or '/'
+                        if path.endswith('/'):
+                            path += 'index.json'
+                        if not path.endswith('.json'):
+                            path += '.json'
+                        if api_dir:
+                            dest_path = os.path.join(api_dir, path.lstrip('/'))
+                        else:
+                            dest_path = os.path.join(output_folder, '_api_fallback', path.lstrip('/'))
+                        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                        data = resp.text()
+                        with open(dest_path,'w',encoding='utf-8') as f: f.write(data)
+                        captured.append(path)
+                        if api_capture_cb:
+                            try:
+                                api_capture_cb(len(captured))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            context.on('response', on_response)
+        pages_processed = 0
+        while to_visit and pages_processed < max_pages:
+            url = to_visit.pop(0)
+            if url in visited:
+                continue
+            visited.add(url)
+            try:
+                page = context.new_page()
+                page.goto(url, wait_until='networkidle')
+                # If router interception enabled, expose binding and inject patch script
+                if router_intercept:
+                    try:
+                        def _enqueue_route(source, route_path):  # type: ignore
+                            try:
+                                if not isinstance(route_path, str):
+                                    return
+                                # Normalize route path; allow full URLs
+                                from urllib.parse import urlparse
+                                rp = route_path
+                                up = urlparse(rp if (rp.startswith('http://') or rp.startswith('https://')) else (origin + rp if origin else rp))
+                                if origin and up.netloc and (up.scheme + '://' + up.netloc) != origin:
+                                    return  # skip cross-origin
+                                norm = up.path or '/'
+                                if up.query:
+                                    norm = norm + '?' + up.query
+                                if router_include_hash and up.fragment:
+                                    norm = norm + '#' + up.fragment
+                                full = (origin + norm) if origin else norm
+                                if (full not in visited and full not in to_visit and full not in router_seen
+                                        and len(router_seen) < max(1, router_max_routes)
+                                        and len(visited) + len(to_visit) < max_pages):
+                                    if _route_allowed(norm):
+                                        router_seen.add(full)
+                                        to_visit.append(full)
+                                        if not router_quiet:
+                                            emit(f"Router discovered: {norm}")
+                                        if router_route_cb:
+                                            try:
+                                                router_route_cb(len(router_seen))
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
+                        page.expose_binding("__cw2dt_enqueue_route", _enqueue_route)
+                        # Inject interception patch
+                        interception_js = f"""
+                            (()=>{{
+                              if (window.__cw2dt_router_patched__) return; window.__cw2dt_router_patched__=true;
+                              const enqueue = (u)=>{{ try{{ window.__cw2dt_enqueue_route(u); }}catch(e){{}} }};
+                              const norm = (u)=>{{ try{{ const x=new URL(u, location.href); return x.pathname + (x.search||'') + {( 'x.hash' if router_include_hash else "''" )}; }}catch(e){{ return u; }} }};
+                              const origPush = history.pushState; history.pushState = function(s,t,u){{ origPush.apply(this, arguments); if(u) enqueue(norm(u)); }};
+                              const origRep = history.replaceState; history.replaceState = function(s,t,u){{ origRep.apply(this, arguments); if(u) enqueue(norm(u)); }};
+                              window.addEventListener('popstate', ()=>enqueue(norm(location.href)) );
+                              window.addEventListener('hashchange', ()=>enqueue(norm(location.href)) );
+                              document.addEventListener('click', (e)=>{{
+                                const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+                                if(!a) return; const href=a.getAttribute('href'); if(!href) return;
+                                if(href.startsWith('mailto:')||href.startsWith('javascript:')) return;
+                                enqueue(norm(href));
+                              }}, {{capture:true}});
+                            }})();
+                        """
+                        page.add_init_script(interception_js)
+                    except Exception:
+                        pass
+                if hook_fn:
+                    try:
+                        hook_fn(page, url, context)
+                    except Exception as e:
+                        emit(f"Hook error on {url}: {e}")
+                # Allow router-settle period before snapshot (captures immediate client redirects)
+                if router_intercept and router_settle_ms > 0:
+                    try:
+                        page.wait_for_timeout(router_settle_ms)
+                    except Exception:
+                        pass
+                if router_intercept and router_wait_selector:
+                    try:
+                        page.wait_for_selector(router_wait_selector, timeout=router_settle_ms * 2)
+                    except Exception:
+                        pass
+                html = page.content()
+                if rewrite_urls and origin:
+                    html = html.replace(origin, '')
+                # Determine output path relative to site_root
+                rel = 'index.html'
+                try:
+                    up = urlparse(url)
+                    rel = up.path
+                    if rel.endswith('/') or rel == '':
+                        rel = (rel.rstrip('/') + '/index.html') if rel else 'index.html'
+                    if not rel.endswith('.html'):
+                        # Only overwrite existing mirror HTML, else skip to avoid polluting non-html assets
+                        if not rel.split('/')[-1].count('.'):  # no extension
+                            rel = rel.rstrip('/') + '.html'
+                except Exception:
+                    pass
+                out_path = os.path.join(site_root, rel.lstrip('/'))
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path,'w',encoding='utf-8') as f:
+                    f.write(html)
+                pages_processed += 1
+                if progress_percent_cb:
+                    try:
+                        pct = int((pages_processed / max_pages) * 100)
+                        progress_percent_cb(pct)
+                    except Exception:
+                        pass
+                emit(f"Prerendered {url} → {rel}")
+                # Discover links
+                for a in page.query_selector_all('a[href]'):
+                    try:
+                        href = a.get_attribute('href')
+                        if not href: continue
+                        if href.startswith('mailto:') or href.startswith('javascript:'): continue
+                        new_url = urljoin(url, href)
+                        if origin and not new_url.startswith(origin):
+                            continue
+                        if new_url not in visited and new_url not in to_visit:
+                            to_visit.append(new_url)
+                    except Exception:
+                        continue
+                page.close()
+            except Exception as e:
+                emit(f"Failed prerender {url}: {e}")
+        browser.close()
+        if capture_api:
+            emit(f"Captured {len(captured)} JSON responses.")
+    emit(f"Prerender finished. Pages: {pages_processed}, Remaining queue: {len(to_visit)}")
+    if progress_percent_cb:
+        try: progress_percent_cb(100)
+        except Exception: pass
+
 # ---------- headless CLI ----------
 def headless_main(argv: list[str]) -> int:
     import argparse
@@ -207,6 +435,24 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--run-built', action='store_true', help='Run the built image (requires --build)')
     parser.add_argument('--serve-folder', action='store_true', help='Serve directly from folder (nginx:alpine)')
     parser.add_argument('--open-browser', action='store_true', help='Open the URL after starting container')
+    # Enhanced compatibility / prerendering
+    parser.add_argument('--prerender', action='store_true', help='After clone, prerender dynamic pages with Playwright (optional dependency)')
+    parser.add_argument('--prerender-max-pages', type=int, default=40, help='Maximum pages to prerender (default: 40)')
+    parser.add_argument('--capture-api', action='store_true', help='Capture JSON API responses during prerender into _api/ directory')
+    parser.add_argument('--hook-script', default=None, help='Path to a Python script exposing on_page(page, url, context) for prerender customization')
+    parser.add_argument('--no-url-rewrite', action='store_true', help='Disable rewriting absolute origin URLs to relative in prerendered content')
+    # Router interception options
+    parser.add_argument('--router-intercept', action='store_true', help='Intercept SPA client-side router (history API) to discover additional routes during prerender')
+    parser.add_argument('--router-include-hash', action='store_true', help='Treat distinct #hash fragments as separate routes when intercepting')
+    parser.add_argument('--router-max-routes', type=int, default=200, help='Maximum additional routes discovered via router interception (default: 200)')
+    parser.add_argument('--router-settle-ms', type=int, default=350, help='Millis to wait after initial load for automatic route pushes before snapshot (default: 350)')
+    parser.add_argument('--router-wait-selector', default=None, help='Optional CSS selector to await after each intercepted route before snapshotting')
+    parser.add_argument('--router-allow', default=None, help='Comma-separated regex patterns; only matching routes are kept (applied after include-hash normalization)')
+    parser.add_argument('--router-deny', default=None, help='Comma-separated regex patterns; matching routes are discarded')
+    parser.add_argument('--router-quiet', action='store_true', help='Suppress per-route discovery log lines while still counting routes')
+    parser.add_argument('--no-manifest', action='store_true', help='Skip writing clone_manifest.json and summary augmentation')
+    parser.add_argument('--checksums', action='store_true', help='Compute SHA256 checksums for mirrored HTML and captured API JSON (adds time)')
+    parser.add_argument('--checksum-ext', default=None, help='Comma-separated extra file extensions to also checksum (e.g. css,js,png)')
 
     args = parser.parse_args(argv)
 
@@ -258,6 +504,78 @@ def headless_main(argv: list[str]) -> int:
 
     # Prepare Dockerfile & nginx.conf
     site_root = find_site_root(output_folder)
+    # Optional prerender step
+    if args.prerender:
+        try:
+            _run_prerender(
+                start_url=args.url,
+                site_root=site_root,
+                output_folder=output_folder,
+                max_pages=max(1, args.prerender_max_pages),
+                capture_api=args.capture_api,
+                hook_script=args.hook_script,
+                rewrite_urls=(not args.no_url_rewrite),
+                api_capture_cb=(lambda n: print(f"[prerender] API JSON captured: {n}")) if args.capture_api else None,
+                router_intercept=args.router_intercept,
+                router_include_hash=args.router_include_hash,
+                router_max_routes=max(1, args.router_max_routes),
+                router_settle_ms=max(0, args.router_settle_ms),
+                router_wait_selector=args.router_wait_selector or None,
+                router_allow=[p.strip() for p in (args.router_allow.split(',') if args.router_allow else []) if p.strip()] or None,
+                router_deny=[p.strip() for p in (args.router_deny.split(',') if args.router_deny else []) if p.strip()] or None,
+                router_route_cb=(lambda n: print(f"[prerender] Router routes discovered: {n}")) if args.router_intercept else None,
+                router_quiet=args.router_quiet
+            )
+        except Exception as e:
+            print(f"[warn] Prerender failed: {e}")
+    # Optional checksum + manifest (headless mode lightweight version)
+    if not args.no_manifest:
+        try:
+            import json, hashlib
+            extra_ext_list = [e.strip().lower().lstrip('.') for e in (args.checksum_ext.split(',') if args.checksum_ext else []) if e.strip()]
+            manifest = {
+                'url': args.url,
+                'docker_name': args.docker_name,
+                'output_folder': output_folder,
+                'prerender': bool(args.prerender),
+                'capture_api': bool(args.capture_api),
+                'router_intercept': bool(args.router_intercept),
+                'checksums_included': bool(args.checksums),
+                'checksum_extra_extensions': extra_ext_list,
+            }
+            if args.checksums:
+                candidates = []
+                extra_ext_tuple = tuple(f".{e}" if not e.startswith('.') else e for e in extra_ext_list)
+                for root, _, files in os.walk(output_folder):
+                    for fn in files:
+                        low = fn.lower()
+                        is_api = ('/_api/' in root.replace('\\','/')) or ('/_api' in root.replace('\\','/'))
+                        cond_html = low.endswith(('.html', '.htm'))
+                        cond_api = is_api and low.endswith('.json')
+                        cond_extra = extra_ext_tuple and low.endswith(extra_ext_tuple)
+                        if cond_html or cond_api or cond_extra:
+                            candidates.append((root, fn))
+                total = len(candidates)
+                checks = {}
+                for idx, (root, fn) in enumerate(candidates, 1):
+                    p = os.path.join(root, fn)
+                    rel = os.path.relpath(p, output_folder)
+                    try:
+                        h = hashlib.sha256()
+                        with open(p, 'rb') as cf:
+                            for chunk in iter(lambda: cf.read(65536), b''):
+                                h.update(chunk)
+                        checks[rel] = h.hexdigest()
+                    except Exception:
+                        continue
+                    if idx == 1 or idx == total or idx % 50 == 0:
+                        print(f"[checksums] {idx}/{total} ({int(idx*100/total)}%)")
+                manifest['checksums_sha256'] = checks
+            with open(os.path.join(output_folder, 'clone_manifest.json'), 'w', encoding='utf-8') as mf:
+                json.dump(manifest, mf, indent=2)
+            print('[manifest] clone_manifest.json written.')
+        except Exception as e:
+            print(f"[warn] Failed to write manifest: {e}")
     if args.disable_js:
         try:
             # reuse same stripper
@@ -437,7 +755,7 @@ if __name__ == '__main__' and '--headless' in sys.argv:
 # After headless early-exit, import Qt for GUI definitions below
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
+    QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
     QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
@@ -614,7 +932,11 @@ class GuardedHandle(QSplitterHandle):
                         return
                     # Map handle-local pos to splitter coords
                     x = self.mapTo(sp, event.pos()).x()
-                    sp.moveSplitter(x, self.index())
+                    # Use first index (0) since exact handle index API may differ across Qt versions
+                    try:
+                        sp.moveSplitter(x, 0)
+                    except Exception:
+                        pass
                     event.accept()
                     return
         except Exception:
@@ -645,6 +967,10 @@ class GuardedHandle(QSplitterHandle):
 class CloneThread(QThread):
     progress = Signal(str)
     total_progress = Signal(int, str)  # (percent, phase)
+    bandwidth = Signal(str)  # human readable current transfer rate
+    api_capture = Signal(int)  # count of API JSON responses captured
+    router_count = Signal(int)  # number of router-discovered routes (accepted)
+    checksum_progress = Signal(int)  # percent for checksum hashing phase (if enabled)
     finished = Signal(str, bool, bool)  # (log, docker_build_success, clone_success)
 
     def __init__(self, url, docker_name, save_path, build_docker,
@@ -653,7 +979,13 @@ class CloneThread(QThread):
                  pre_existing_count=0, pre_partial_count=0,
                  estimate_first=False, parallel_jobs=1,
                  disable_js=False,
-                 cookies_file: str | None = None):
+                 prerender=False, prerender_max_pages=40, capture_api=False, hook_script=None, rewrite_urls=True,
+                 router_intercept=False, router_include_hash=False, router_max_routes=200, router_settle_ms=350, router_wait_selector=None,
+                 router_allow=None, router_deny=None,
+                 cookies_file: str | None = None,
+                 no_manifest: bool = False,
+                 checksums: bool = False,
+                 checksum_extra_ext: list[str] | None = None):
         super().__init__()
         self.url = url
         self.docker_name = docker_name.strip()
@@ -675,6 +1007,29 @@ class CloneThread(QThread):
         self._canceled = False
         self.disable_js = bool(disable_js)
         self.cookies_file = cookies_file
+        # Enhanced compatibility options
+        self.prerender = bool(prerender)
+        self.prerender_max_pages = max(1, int(prerender_max_pages or 1))
+        self.capture_api = bool(capture_api)
+        self.hook_script = hook_script
+        self.rewrite_urls = bool(rewrite_urls)
+        self.router_intercept = bool(router_intercept)
+        self.router_include_hash = bool(router_include_hash)
+        self.router_max_routes = int(router_max_routes)
+        self.router_settle_ms = int(router_settle_ms)
+        self.router_wait_selector = router_wait_selector
+        self.router_allow = router_allow
+        self.router_deny = router_deny
+        self._router_discovered_count = 0
+        self.router_quiet = False  # set by GUI option if enabled
+        self._api_captured_count = 0
+        self._started_utc = datetime.utcnow()
+        self.no_manifest = bool(no_manifest)
+        self.checksums = bool(checksums)
+        self.checksum_extra_ext = [e.lower().lstrip('.') for e in (checksum_extra_ext or []) if e]
+        # phase timing (store simple floats)
+        self._phase_start_time = {}
+        self._phase_end_time = {}
 
     def request_stop(self):
         self._stop_requested = True
@@ -690,14 +1045,39 @@ class CloneThread(QThread):
         docker_success = False
         clone_success = False
 
-        def log_msg(m): log.append(m); self.progress.emit(m)
+        def log_msg(m):
+            log.append(m)
+            self.progress.emit(m)
 
-        # init overall progress tracking
-        self._phase_pct = {"clone": 0, "build": 0, "cleanup": 0}
+        # init overall progress tracking with dynamic optional phases
+        phases = ["clone"]
+        if self.prerender:
+            phases.append("prerender")
+        if self.checksums:
+            phases.append("checksums")
         if self.build_docker:
-            weights = {"clone": 0.6, "build": 0.35, "cleanup": 0.05}
+            phases.append("build")
+        phases.append("cleanup")
+        self._phase_pct = {p: 0 for p in phases}
+        # Base heuristic weights then adjust for presence of optional phases
+        if self.build_docker:
+            if self.prerender and self.checksums:
+                weights = {"clone": 0.42, "prerender": 0.15, "checksums": 0.08, "build": 0.30, "cleanup": 0.05}
+            elif self.prerender and not self.checksums:
+                weights = {"clone": 0.45, "prerender": 0.15, "build": 0.35, "cleanup": 0.05}
+            elif self.checksums and not self.prerender:
+                weights = {"clone": 0.55, "checksums": 0.10, "build": 0.30, "cleanup": 0.05}
+            else:
+                weights = {"clone": 0.6, "build": 0.4, "cleanup": 0.05}
         else:
-            weights = {"clone": 0.9, "build": 0.0, "cleanup": 0.1}
+            if self.prerender and self.checksums:
+                weights = {"clone": 0.58, "prerender": 0.20, "checksums": 0.12, "cleanup": 0.10}
+            elif self.prerender and not self.checksums:
+                weights = {"clone": 0.7, "prerender": 0.2, "cleanup": 0.1}
+            elif self.checksums and not self.prerender:
+                weights = {"clone": 0.75, "checksums": 0.15, "cleanup": 0.10}
+            else:
+                weights = {"clone": 0.9, "cleanup": 0.1}
         total_w = sum(weights.values()) or 1.0
         self._weights = {k: (v / total_w) for k, v in weights.items()}
 
@@ -706,20 +1086,24 @@ class CloneThread(QThread):
                 pct = max(0, min(100, int(pct)))
             except Exception:
                 pct = 0
+            # track start/end times
+            import time as _time
+            if phase not in self._phase_start_time and pct > 0:
+                self._phase_start_time[phase] = _time.time()
             self._phase_pct[phase] = pct
-            total = int(round(
-                self._phase_pct["clone"] * self._weights["clone"] +
-                self._phase_pct["build"] * self._weights["build"] +
-                self._phase_pct["cleanup"] * self._weights["cleanup"]
-            ))
+            if pct >= 100:
+                self._phase_end_time.setdefault(phase, _time.time())
+            # recompute overall weighted total
+            total = 0
+            for ph, w in self._weights.items():
+                total += (self._phase_pct.get(ph, 0) * w)
+            total = int(round(total))
             self.total_progress.emit(total, phase)
 
         if not is_wget2_available():
             log_msg("Error: wget2 is not installed. Please install it and try again.")
             self.finished.emit("\n".join(log), docker_success, clone_success); return
-
         output_folder = os.path.join(self.save_path, self.docker_name if self.docker_name else "site")
-        # Do not delete existing folder; allow resuming and skipping already-downloaded files
         os.makedirs(output_folder, exist_ok=True)
 
         log_msg(f"Cloning {self.url} into {output_folder}")
@@ -756,7 +1140,6 @@ class CloneThread(QThread):
         if self.throttle: wget_cmd += ["--limit-rate", human_rate_suffix(self.throttle)]
         if self.http_user:
             wget_cmd += ["--http-user", self.http_user]
-            # note: passing password on CLI can expose it to other users via process list
             if self.http_password is not None:
                 wget_cmd += ["--http-password", self.http_password]
             self.progress.emit("Using HTTP authentication for cloning (credentials not shown).")
@@ -784,8 +1167,36 @@ class CloneThread(QThread):
         if self._stop_requested:
             log_msg("Clone canceled by user.")
             self.finished.emit("\n".join(log), docker_success, clone_success); return
-
         site_root = find_site_root(output_folder)
+        # Optional prerender (performed before JS stripping / Docker build)
+        if self.prerender and not self._stop_requested:
+            try:
+                self.progress.emit(f"Starting prerender (max {self.prerender_max_pages} pages)...")
+                emit_total("prerender", 0)
+                _run_prerender(
+                    start_url=self.url,
+                    site_root=site_root,
+                    output_folder=output_folder,
+                    max_pages=self.prerender_max_pages,
+                    capture_api=self.capture_api,
+                    hook_script=self.hook_script,
+                    rewrite_urls=self.rewrite_urls,
+                    progress_cb=self.progress.emit,
+                    progress_percent_cb=lambda pct: emit_total("prerender", pct),
+                    api_capture_cb=(lambda n: (setattr(self, '_api_captured_count', n), self.api_capture.emit(n))[1]) if self.capture_api else None,
+                    router_intercept=self.router_intercept,
+                    router_include_hash=self.router_include_hash,
+                    router_max_routes=self.router_max_routes,
+                    router_settle_ms=self.router_settle_ms,
+                    router_wait_selector=self.router_wait_selector,
+                    router_allow=self.router_allow,
+                    router_deny=self.router_deny,
+                    router_route_cb=(lambda n: (setattr(self, '_router_discovered_count', n), self.router_count.emit(n))[1]) if self.router_intercept else None,
+                    router_quiet=self.router_quiet
+                )
+                self.progress.emit("Prerender complete (100%).")
+            except Exception as e:
+                self.progress.emit(f"Prerender failed: {e}")
         # Optionally strip scripts from HTML to prevent JS execution
         if self.disable_js:
             try:
@@ -996,6 +1407,137 @@ class CloneThread(QThread):
             )
         log_msg("README created.")
 
+        # Write machine-consumable manifest + concise summary (best-effort) unless disabled
+        if not self.no_manifest:
+            try:
+                import json
+                manifest = {
+                "url": self.url,
+                "docker_name": self.docker_name,
+                "output_folder": os.path.abspath(output_folder),
+                "started_utc": self._started_utc.isoformat() + 'Z',
+                "completed_utc": datetime.utcnow().isoformat() + 'Z',
+                "clone_success": clone_success,
+                "docker_built": docker_success,
+                "prerender": self.prerender,
+                "prerender_max_pages": self.prerender_max_pages if self.prerender else None,
+                "api_capture": self.capture_api if self.prerender else False,
+                "api_captured_count": self._api_captured_count if self.capture_api else 0,
+                "router_intercept": self.router_intercept if self.prerender else False,
+                "router_routes": self._router_discovered_count if (self.prerender and self.router_intercept) else 0,
+                "router_include_hash": self.router_include_hash if self.router_intercept else False,
+                "router_max_routes": self.router_max_routes if self.router_intercept else None,
+                "router_allow": self.router_allow or [],
+                "router_deny": self.router_deny or [],
+                "router_quiet": self.router_quiet if self.router_intercept else False,
+                "disable_js": self.disable_js,
+                "parallel_jobs": self.parallel_jobs,
+                "size_cap_bytes": self.size_cap,
+                "throttle_bytes_per_sec": self.throttle,
+                "http_auth_used": bool(self.http_user),
+            }
+                # Optionally compute checksums (HTML + API JSON + extra ext)
+                if self.checksums:
+                    emit_total("checksums", 0)
+                    import hashlib, time as _t
+                    candidates = []
+                    extra_ext = tuple(f".{e}" if not e.startswith('.') else e for e in self.checksum_extra_ext)
+                    for root, _, files in os.walk(output_folder):
+                        for fn in files:
+                            low = fn.lower()
+                            is_api = ('/_api/' in root.replace('\\','/')) or ('/_api' in root.replace('\\','/'))
+                            cond_html = low.endswith(('.html', '.htm'))
+                            cond_api = is_api and low.endswith('.json')
+                            cond_extra = extra_ext and low.endswith(extra_ext)
+                            if cond_html or cond_api or cond_extra:
+                                candidates.append((root, fn))
+                    total = len(candidates)
+                    checks = {}
+                    last_emit = 0.0
+                    for idx, (root, fn) in enumerate(candidates, 1):
+                        p = os.path.join(root, fn)
+                        rel = os.path.relpath(p, output_folder)
+                        try:
+                            h = hashlib.sha256()
+                            with open(p, 'rb') as cf:
+                                for chunk in iter(lambda: cf.read(65536), b''):
+                                    h.update(chunk)
+                            checks[rel] = h.hexdigest()
+                        except Exception:
+                            continue
+                        now = _t.time()
+                        pct = int(idx * 100 / total) if total else 100
+                        if idx == 1 or idx == total or (now - last_emit) > 0.6 or (idx % 50 == 0):
+                            last_emit = now
+                            try:
+                                self.progress.emit(f"Checksums: {idx}/{total} ({pct}%)")
+                            except Exception:
+                                pass
+                            try:
+                                self.checksum_progress.emit(pct)
+                            except Exception:
+                                pass
+                        emit_total("checksums", pct)
+                    manifest['checksums_sha256'] = checks
+                    if self.checksum_extra_ext:
+                        manifest['checksum_extra_extensions'] = self.checksum_extra_ext
+                    self.progress.emit("Checksums complete (100%).")
+                # Phase timing summary (seconds)
+                if self._phase_start_time:
+                    import math
+                    timings = {}
+                    for ph, st in self._phase_start_time.items():
+                        et = self._phase_end_time.get(ph)
+                        if et:
+                            timings[ph] = round(et - st, 2)
+                    if timings:
+                        manifest['phase_durations_seconds'] = timings
+                # API capture note if enabled but none found
+                if manifest.get('api_capture') and not manifest.get('api_captured_count'):
+                    manifest['api_capture_note'] = 'API capture enabled but no JSON responses matched filtering.'
+                with open(os.path.join(output_folder, 'clone_manifest.json'), 'w', encoding='utf-8') as mf:
+                    json.dump(manifest, mf, indent=2)
+                readme_path = os.path.join(output_folder, f"README_{(self.docker_name or 'site').strip()}.md")
+                try:
+                    repro = ["python cw2dt.py --headless", f"--url '{self.url}'", f"--dest '{self.save_path}'", f"--docker-name '{self.docker_name}'"]
+                    if self.prerender: repro.append("--prerender")
+                    if self.prerender and self.prerender_max_pages != 40: repro.append(f"--prerender-max-pages {self.prerender_max_pages}")
+                    if self.capture_api: repro.append("--capture-api")
+                    if not self.rewrite_urls: repro.append("--no-url-rewrite")
+                    if self.router_intercept: repro.append("--router-intercept")
+                    if self.router_intercept and self.router_include_hash: repro.append("--router-include-hash")
+                    if self.router_intercept and self.router_max_routes != 200: repro.append(f"--router-max-routes {self.router_max_routes}")
+                    if self.router_intercept and self.router_settle_ms != 350: repro.append(f"--router-settle-ms {self.router_settle_ms}")
+                    if self.router_intercept and self.router_wait_selector: repro.append(f"--router-wait-selector '{self.router_wait_selector}'")
+                    if self.router_intercept and self.router_allow: repro.append(f"--router-allow {','.join(self.router_allow)}")
+                    if self.router_intercept and self.router_deny: repro.append(f"--router-deny {','.join(self.router_deny)}")
+                    if self.router_intercept and self.router_quiet: repro.append("--router-quiet")
+                    if self.disable_js: repro.append("--disable-js")
+                    if self.size_cap: repro.append(f"--size-cap {human_quota_suffix(self.size_cap)}")
+                    if self.throttle: repro.append(f"--throttle {human_rate_suffix(self.throttle)}")
+                    if self.parallel_jobs > 1: repro.append(f"--jobs {self.parallel_jobs}")
+                    if self.checksums: repro.append("--checksums")
+                    if self.checksum_extra_ext: repro.append(f"--checksum-ext {','.join(self.checksum_extra_ext)}")
+                    if self.no_manifest: repro.append("--no-manifest")
+                    with open(readme_path, 'a', encoding='utf-8') as rf:
+                        rf.write("\n\n---\n## Clone Summary\n")
+                        rf.write(f"- Prerender: {'yes' if self.prerender else 'no'}\n")
+                        if self.prerender:
+                            rf.write(f"  - API captured: {self._api_captured_count}\n")
+                            if self.router_intercept:
+                                rf.write(f"  - Router routes: {self._router_discovered_count}\n")
+                        if self.checksums:
+                            rf.write("  - Checksums: yes\n")
+                            if self.checksum_extra_ext:
+                                rf.write(f"    * Extra extensions: {', '.join(self.checksum_extra_ext)}\n")
+                        rf.write("\n### Reproduce (approx)\n")
+                        rf.write("```bash\n" + " \\\n+  ".join(repro) + "\n```\n")
+                except Exception:
+                    pass
+                log_msg("Manifest written.")
+            except Exception as e:
+                self.progress.emit(f"Manifest write failed: {e}")
+
         # ensure total progress is shown as 100% at the end
         emit_total("cleanup", 100)
         self.finished.emit("\n".join(log), docker_success, clone_success)
@@ -1017,6 +1559,11 @@ class CloneThread(QThread):
             return False
 
         last_pct = -1
+        last_rate = None
+        last_rate_emit_time = 0.0
+        import re, time as _time
+        # Pattern capturing speed tokens (e.g., 123K/s, 1.2M/s, 450/s, 450B/s)
+        speed_re = re.compile(r"(?P<val>\d+(?:\.\d+)?)(?P<unit>[KMG]?)(?:B?/s|/s)")
         try:
             stream = proc.stderr
             if stream is not None:
@@ -1037,6 +1584,18 @@ class CloneThread(QThread):
                                 self.progress.emit(f"Cloning site: {pct}%")
                                 emit_total_cb("clone", pct)
                             break
+                    # Extract current transfer rate if present; throttle UI updates
+                    if 's' in line:  # cheap filter
+                        m = speed_re.search(line)
+                        if m:
+                            unit = m.group('unit') or ''
+                            val = m.group('val')
+                            human_rate = f"{val}{unit}B/s" if unit else f"{val}B/s"
+                            now = _time.time()
+                            if human_rate != last_rate and (now - last_rate_emit_time) > 0.2:
+                                last_rate = human_rate
+                                last_rate_emit_time = now
+                                self.bandwidth.emit(human_rate)
             if self._stop_requested:
                 try:
                     proc.terminate()
@@ -1206,77 +1765,44 @@ class CloneThread(QThread):
                         continue
         return scanned, stripped
 
-# ---------- GUI (Dark gray/blue, regrouped sections) ----------
-# Bring in Qt now that headless path has had a chance to exit
-def build_dark_css(scale: float = 1.0) -> str:
+def build_light_css(scale: float = 1.0) -> str:
     sf = max(0.7, min(1.5, float(scale or 1.0)))
     fs_base = int(round(13 * sf))
     fs_title = int(round(14 * sf))
     fs_section = int(round(15 * sf))
-    rad_inp = max(6, int(round(10 * sf)))
-    pad_v = max(3, int(round(6 * sf)))
+    # Reduced rounding for inputs/buttons/card
+    rad_inp = max(2, int(round(4 * sf)))
+    pad_v = max(3, int(round(5 * sf)))
     pad_h = max(4, int(round(8 * sf)))
-    rad_btn = max(8, int(round(12 * sf)))
-    rad_card = max(10, int(round(18 * sf)))
-    pad_status = max(6, int(round(8 * sf)))
+    rad_btn = max(3, int(round(6 * sf)))
+    rad_card = max(4, int(round(6 * sf)))
     return f"""
-QWidget {{ color: #E6EDF3; font-size: {fs_base}px; }}
+QWidget {{ color: #1d2733; font-size: {fs_base}px; }}
 QWidget {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                      stop:0 #0e1621, stop:0.6 #152233, stop:1 #1b2a3c); }}
-
-/* Inputs */
+                                      stop:0 #f4f6f9, stop:1 #e7ebf1); }}
 QLineEdit, QTextEdit, QSpinBox, QComboBox {{
-    background-color: rgba(40, 52, 70, 190);
-    border: 1px solid rgba(120, 140, 170, 160);
+    background-color: #ffffff;
+    border: 1px solid #b9c4d1;
     border-radius: {rad_inp}px;
     padding: {pad_v}px {pad_h}px;
-    color: #E6EDF3;
+    color: #1d2733;
 }}
-QTextEdit {{ selection-background-color: rgba(120,140,170,180); }}
-
-/* Buttons */
 QPushButton {{
-    background-color: #486a97;
-    border: 1px solid #6789b3;
+    background-color: #2d6fd2;
+    border: 1px solid #2d6fd2;
     border-radius: {rad_btn}px;
     padding: {pad_v+2}px {pad_h+2}px;
-    color: #E6EDF3;
+    color: #ffffff;
 }}
-QPushButton#primaryBtn {{ background-color: #4e78b8; border-color: #6b93cf; }}
-QPushButton#ghostBtn {{
-    background-color: rgba(78,120,184,0.15);
-    border-color: rgba(107,147,207,0.25);
-}}
-QPushButton#dangerBtn {{ background-color: #b85555; border-color: #d27a7a; }}
-QPushButton:disabled {{
-    background-color: rgba(72,106,151,90);
-    border-color: rgba(103,137,179,90);
-    color: rgba(230, 237, 243, 120);
-}}
-
-/* Titles and panel */
-QLabel[role="title"] {{ color: #C9D7EC; font-size: {fs_title}px; margin-top: {max(2,int(6*sf))}px; margin-bottom: {max(1,int(2*sf))}px; }}
-QLabel[role="section"] {{ color: #AEC3E8; font-size: {fs_section}px; font-weight: 600; margin-top: {max(4,int(8*sf))}px; }}
-QFrame#card {{
-    background-color: rgba(28, 38, 52, 210);
-    border-radius: {rad_card}px;
-    border: 1px solid rgba(120, 140, 170, 120);
-}}
-
-/* Divider */
-QFrame#divider {{
-    background-color: rgba(120, 140, 170, 90);
-    min-height: 1px; max-height: 1px; border: none;
-}}
-
-/* Status pill */
-QLabel#status {{
-    background-color: rgba(40, 50, 65, 220);
-    border-radius: 12px;
-    border: 1px solid rgba(120, 140, 170, 120);
-    padding: {pad_status}px;
-    color: #E6EDF3;
-}}
+QPushButton#primaryBtn {{ background-color: #1d5fbf; }}
+QPushButton#ghostBtn {{ background-color: rgba(45,111,210,0.12); border:1px solid rgba(45,111,210,0.35); color:#1d5fbf; }}
+QPushButton#dangerBtn {{ background-color: #d24c3b; border-color: #d24c3b; }}
+QPushButton:disabled {{ background-color: #d4dbe3; color: #7a8896; border-color: #c2cbd5; }}
+QLabel[role=\"title\"] {{ color: #2d3e50; font-size: {fs_title}px; font-weight: 500; }}
+QLabel[role=\"section\"] {{ color: #1d5fbf; font-size: {fs_section}px; font-weight: 600; }}
+QFrame#card {{ background-color: #ffffff; border-radius: {rad_card}px; border:1px solid #c2ccd6; }}
+QFrame#divider {{ background-color: #ccd6e2; min-height:1px; max-height:1px; }}
+QLabel#status {{ background-color: #f0f3f7; border:1px solid #ccd6e2; border-radius: 10px; padding:6px; color:#1d2733; }}
 """
 
 class InstallerThread(QThread):
@@ -1294,17 +1820,22 @@ class InstallerThread(QThread):
             self.progress.emit(f"Installer start failed: {e}")
             self.finished_ok.emit(False)
             return
-        lines = []
+        lines: list[str] = []  # keep only last 50 lines
         try:
             stream = proc.stdout
             if stream is not None:
-                for line in stream:
+                for raw_line in stream:
+                    if raw_line is None:
+                        continue
+                    line = raw_line.rstrip('\n')
                     if not line:
                         continue
-                    lines.append(line.rstrip())
-                    self.progress.emit(line.rstrip())
+                    lines.append(line)
+                    if len(lines) > 50:
+                        del lines[0:len(lines)-50]
+                    self.progress.emit(line)
             proc.wait()
-        except Exception as e:
+        except Exception as e:  # pragma: no cover - defensive
             self.progress.emit(f"Installer error: {e}")
         ok = (proc.returncode == 0)
         if not ok and lines:
@@ -1338,10 +1869,18 @@ class DockerClonerGUI(QWidget):
         self.last_clone_failed_or_canceled = False
 
         # Settings for persistence (geometry, recents)
-        self.settings = QSettings("CloneWebsiteDockerTool", "CW2DT")
+        try:
+            self.settings = QSettings("CloneWebsiteDockerTool", "CW2DT")
+        except Exception:
+            # Fallback: older PySide variant may prefer just organization
+            try:
+                self.settings = QSettings("CloneWebsiteDockerTool")  # type: ignore
+            except Exception:
+                self.settings = None
         # Automatic UI scale based on available screen size (no manual control)
         self.ui_scale = self._compute_auto_scale()
-        self.setStyleSheet(build_dark_css(self.ui_scale))
+        # Use a lighter variant by default to improve readability (single theme only)
+        self.setStyleSheet(build_light_css(self.ui_scale))
 
         # Outer layout
         root = QVBoxLayout(self)
@@ -1352,9 +1891,7 @@ class DockerClonerGUI(QWidget):
         # Card
         self.card = QFrame()
         self.card.setObjectName("card")
-        card_shadow = QGraphicsDropShadowEffect(self.card)
-        card_shadow.setBlurRadius(24); card_shadow.setOffset(0, 8); card_shadow.setColor(Qt.GlobalColor.black)
-        self.card.setGraphicsEffect(card_shadow)
+        # Shadow removed for flatter appearance
 
         card_layout = QVBoxLayout(self.card)
         self._set_scaled_margins(card_layout, 18, 18, 18, 18)
@@ -1423,6 +1960,15 @@ class DockerClonerGUI(QWidget):
         icon_row.addStretch(1)
         card_layout.addLayout(icon_row)
 
+        # Interface options (Advanced Mode toggle)
+        self.interface_frame = QFrame(); iface = QHBoxLayout(self.interface_frame); iface.setContentsMargins(0,0,0,0)
+        self.advanced_mode_checkbox = QCheckBox("Advanced Mode")
+        self.advanced_mode_checkbox.setToolTip("Toggle to show expanded advanced sections by default. When off, sections remain but start collapsed.")
+        self.advanced_mode_checkbox.setChecked(False)
+        self.advanced_mode_checkbox.stateChanged.connect(self._apply_advanced_mode)
+        iface.addWidget(self.advanced_mode_checkbox); iface.addStretch(1)
+        card_layout.addWidget(self.interface_frame)
+
         # ---------- DEPENDENCIES ----------
         self.deps_frame = QFrame(); deps = QHBoxLayout(self.deps_frame); deps.setContentsMargins(0,0,0,0)
         # Status-only labels (no action buttons here)
@@ -1459,6 +2005,20 @@ class DockerClonerGUI(QWidget):
         source_grid.addWidget(self.lbl_dest, 1, 0); source_grid.addLayout(dest_row, 1, 1, 1, 2)
         card_layout.addLayout(source_grid)
 
+        # Helper to bind enabling of widgets to a checkbox state (immediate apply + on change).
+        # Keeps UI logic DRY versus many repeated lambda stateChanged connections.
+        def _bind_enable(chk: QCheckBox, *widgets):
+            def _apply():
+                on = chk.isChecked()
+                for w in widgets:
+                    try:
+                        w.setEnabled(on)
+                    except Exception:
+                        pass
+            chk.stateChanged.connect(_apply)
+            _apply()
+        self._bind_enable = _bind_enable  # store for later use
+
         # ---------- BUILD (collapsible) ----------
         build_grid = QGridLayout(); build_grid.setHorizontalSpacing(10); build_grid.setVerticalSpacing(8)
         self.build_checkbox = QCheckBox("Build Docker image after clone")
@@ -1473,8 +2033,7 @@ class DockerClonerGUI(QWidget):
         self.size_cap_value = QSpinBox(); self.size_cap_value.setRange(1,1_000_000); self.size_cap_value.setValue(200)
         self.size_cap_unit = QComboBox(); self.size_cap_unit.addItems(["MB","GB","TB"])
         self.size_cap_value.setEnabled(False); self.size_cap_unit.setEnabled(False)
-        self.size_cap_checkbox.stateChanged.connect(lambda: self.size_cap_value.setEnabled(self.size_cap_checkbox.isChecked()))
-        self.size_cap_checkbox.stateChanged.connect(lambda: self.size_cap_unit.setEnabled(self.size_cap_checkbox.isChecked()))
+    # (Enable logic unified later via self._bind_enable)
         sz.addWidget(self.size_cap_checkbox); sz.addSpacing(6); sz.addWidget(self.size_cap_value); sz.addWidget(self.size_cap_unit)
         build_grid.addWidget(self.size_frame, 2, 0, 1, 3)
 
@@ -1483,8 +2042,7 @@ class DockerClonerGUI(QWidget):
         self.throttle_value = QSpinBox(); self.throttle_value.setRange(1,1_000_000); self.throttle_value.setValue(1024)
         self.throttle_unit = QComboBox(); self.throttle_unit.addItems(["KB/s","MB/s"])
         self.throttle_value.setEnabled(False); self.throttle_unit.setEnabled(False)
-        self.throttle_checkbox.stateChanged.connect(lambda: self.throttle_value.setEnabled(self.throttle_checkbox.isChecked()))
-        self.throttle_checkbox.stateChanged.connect(lambda: self.throttle_unit.setEnabled(self.throttle_checkbox.isChecked()))
+    # (Enable logic unified later via self._bind_enable)
         th.addWidget(self.throttle_checkbox); th.addSpacing(6); th.addWidget(self.throttle_value); th.addWidget(self.throttle_unit)
         build_grid.addWidget(self.throttle_frame, 3, 0, 1, 3)
 
@@ -1493,60 +2051,132 @@ class DockerClonerGUI(QWidget):
         self.build_section.setContentLayout(build_grid)
         card_layout.addWidget(self.build_section)
 
-        # ---------- ADVANCED (collapsible) ----------
-        self.auth_frame = QFrame(); au = QHBoxLayout(self.auth_frame); au.setContentsMargins(0,0,0,0)
-        self.auth_checkbox = QCheckBox("Use HTTP authentication")
-        self.auth_checkbox.setToolTip(
-            "Warning: Providing username/password passes them to wget2 via the command line, "
-            "which may be visible to other local users via process listings. "
-            "For stricter security, consider using a temporary .wgetrc/.netrc file."
-        )
-        self.auth_user_input = QLineEdit(); self.auth_user_input.setPlaceholderText("Username")
-        self.auth_pass_input = QLineEdit(); self.auth_pass_input.setPlaceholderText("Password"); self.auth_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
-        for w in (self.auth_user_input, self.auth_pass_input):
-            w.setEnabled(False)
-        self.auth_checkbox.stateChanged.connect(lambda: self.auth_user_input.setEnabled(self.auth_checkbox.isChecked()))
-        self.auth_checkbox.stateChanged.connect(lambda: self.auth_pass_input.setEnabled(self.auth_checkbox.isChecked()))
-        au.addWidget(self.auth_checkbox); au.addSpacing(6); au.addWidget(self.auth_user_input); au.addWidget(self.auth_pass_input)
-        adv_grid = QGridLayout(); adv_grid.setHorizontalSpacing(10); adv_grid.setVerticalSpacing(8)
-        adv_grid.addWidget(self.auth_frame, 0, 0, 1, 3)
-
-        # Estimation + Parallelism (Advanced)
-        self.estimate_frame = QFrame(); ef = QHBoxLayout(self.estimate_frame); ef.setContentsMargins(0,0,0,0)
-        self.estimate_checkbox = QCheckBox("Estimate files before clone"); self.estimate_checkbox.setChecked(True)
-        self.parallel_checkbox = QCheckBox("Enable parallel downloads"); self.parallel_checkbox.setChecked(True)
-        self.parallel_label = QLabel("Parallel jobs:"); self.parallel_label.setProperty("role", "title")
-        self.parallel_jobs_input = QSpinBox(); self.parallel_jobs_input.setRange(1, 64); self.parallel_jobs_input.setValue(self.default_parallel_jobs)
-        # enable/disable spinner by checkbox
-        self.parallel_jobs_input.setEnabled(self.parallel_checkbox.isChecked())
-        self.parallel_checkbox.stateChanged.connect(lambda: self.parallel_jobs_input.setEnabled(self.parallel_checkbox.isChecked()))
-        self.disable_js_checkbox = QCheckBox("Disable JavaScript (strip scripts + CSP)"); self.disable_js_checkbox.setChecked(False)
-        ef.addWidget(self.disable_js_checkbox); ef.addSpacing(12)
-        ef.addWidget(self.estimate_checkbox); ef.addSpacing(12)
-        ef.addWidget(self.parallel_checkbox); ef.addSpacing(8)
-        ef.addWidget(self.parallel_label); ef.addWidget(self.parallel_jobs_input); ef.addStretch(1)
-        adv_grid.addWidget(self.estimate_frame, 1, 0, 1, 3)
-
-        # Cookie import row
-        self.cookies_row = QHBoxLayout(); self.cookies_row.setContentsMargins(0,0,0,0)
-        self.scan_cookies_btn = QPushButton("Scan Browser Cookies"); self.scan_cookies_btn.setObjectName("ghostBtn")
-        self.scan_cookies_btn.setToolTip("Search common browser profiles for cookies matching the current URL and import them for authenticated requests.")
-        self.scan_cookies_btn.clicked.connect(self.scan_browser_cookies)
-        self.use_cookies_checkbox = QCheckBox("Use imported cookies")
-        self.use_cookies_checkbox.setChecked(False); self.use_cookies_checkbox.setEnabled(False)
+        # ---------- AUTH & SESSIONS ----------
+        auth_layout = QGridLayout(); auth_layout.setHorizontalSpacing(10); auth_layout.setVerticalSpacing(6)
+        self.auth_checkbox = QCheckBox("HTTP authentication")
+        self.auth_checkbox.setToolTip("Use basic auth (credentials passed to wget2; consider netrc for higher security).")
+        self.auth_user_input = QLineEdit(); self.auth_user_input.setPlaceholderText("User"); self.auth_user_input.setEnabled(False)
+        self.auth_pass_input = QLineEdit(); self.auth_pass_input.setPlaceholderText("Password"); self.auth_pass_input.setEchoMode(QLineEdit.EchoMode.Password); self.auth_pass_input.setEnabled(False)
+    # (Enable logic unified later via self._bind_enable)
+        auth_layout.addWidget(self.auth_checkbox, 0,0)
+        auth_layout.addWidget(self.auth_user_input,0,1)
+        auth_layout.addWidget(self.auth_pass_input,0,2)
+        # Cookies
+        self.scan_cookies_btn = QPushButton("Scan Cookies"); self.scan_cookies_btn.setObjectName("ghostBtn"); self.scan_cookies_btn.clicked.connect(self.scan_browser_cookies)
+        self.use_cookies_checkbox = QCheckBox("Use imported cookies"); self.use_cookies_checkbox.setEnabled(False)
         self.cookies_status = QLabel("No cookies imported")
-        self.cookies_row.addWidget(self.scan_cookies_btn)
-        self.cookies_row.addSpacing(8)
-        self.cookies_row.addWidget(self.use_cookies_checkbox)
-        self.cookies_row.addSpacing(12)
-        self.cookies_row.addWidget(self.cookies_status)
-        self.cookies_row.addStretch(1)
-        adv_grid.addLayout(self.cookies_row, 2, 0, 1, 3)
-        self.adv_section = CollapsibleSection("Advanced Options", start_collapsed=True)
-        self.adv_section.setContentLayout(adv_grid)
-        card_layout.addWidget(self.adv_section)
+        cookie_row = QHBoxLayout(); cookie_row.addWidget(self.scan_cookies_btn); cookie_row.addWidget(self.use_cookies_checkbox); cookie_row.addSpacing(6); cookie_row.addWidget(self.cookies_status); cookie_row.addStretch(1)
+        auth_layout.addLayout(cookie_row,1,0,1,3)
+        self.auth_section = CollapsibleSection("Auth & Sessions", start_collapsed=True)
+        self.auth_section.setContentLayout(auth_layout)
+        card_layout.addWidget(self.auth_section)
 
-        # ---------- RUN (collapsible, but keep action buttons outside) ----------
+        # ---------- PERFORMANCE & LIMITS ----------
+        perf_layout = QGridLayout(); perf_layout.setHorizontalSpacing(10); perf_layout.setVerticalSpacing(6)
+        self.estimate_checkbox = QCheckBox("Estimate before clone"); self.estimate_checkbox.setChecked(True)
+        self.parallel_checkbox = QCheckBox("Parallel downloads"); self.parallel_checkbox.setChecked(True)
+        self.parallel_jobs_label = QLabel("Jobs:")
+        self.parallel_jobs_input = QSpinBox(); self.parallel_jobs_input.setRange(1,64); self.parallel_jobs_input.setValue(self.default_parallel_jobs); self.parallel_jobs_input.setEnabled(True)
+    # (Enable logic unified later via self._bind_enable)
+        self.disable_js_checkbox = QCheckBox("Disable JavaScript post-clone")
+        # Reuse existing size/throttle frames from build section visually by duplicating minimal controls (no side-effects)
+        perf_layout.addWidget(self.estimate_checkbox,0,0)
+        perf_layout.addWidget(self.parallel_checkbox,0,1)
+        perf_layout.addWidget(self.parallel_jobs_label,0,2)
+        perf_layout.addWidget(self.parallel_jobs_input,0,3)
+        perf_layout.addWidget(self.disable_js_checkbox,1,0,1,2)
+        self.perf_section = CollapsibleSection("Performance & Limits", start_collapsed=True)
+        self.perf_section.setContentLayout(perf_layout)
+        card_layout.addWidget(self.perf_section)
+
+        # ---------- DYNAMIC RENDERING ----------
+        from PySide6.QtWidgets import QSpinBox as _QSpinBox
+        dyn_layout = QGridLayout(); dyn_layout.setHorizontalSpacing(10); dyn_layout.setVerticalSpacing(6)
+        self.prerender_checkbox = QCheckBox("Enable prerender (Playwright)")
+        self.prerender_pages_spin = _QSpinBox(); self.prerender_pages_spin.setRange(1,500); self.prerender_pages_spin.setValue(40); self.prerender_pages_spin.setEnabled(False)
+        self.capture_api_checkbox = QCheckBox("Capture API JSON"); self.capture_api_checkbox.setEnabled(False)
+        self.no_rewrite_checkbox = QCheckBox("Keep absolute URLs"); self.no_rewrite_checkbox.setEnabled(False)
+        self.hook_script_btn = QPushButton("Select Hook Script"); self.hook_script_btn.setObjectName("ghostBtn")
+        self.hook_script_path = None
+        def pick_hook():
+            path, _ = QFileDialog.getOpenFileName(self, "Select Hook Script", "", "Python Files (*.py)")
+            if path:
+                self.hook_script_path = path; self.console.append(f"Hook script set: {path}")
+        self.hook_script_btn.clicked.connect(pick_hook)
+    # (Enable logic unified later via self._bind_enable)
+        dyn_layout.addWidget(self.prerender_checkbox,0,0,1,2)
+        dyn_layout.addWidget(QLabel("Max pages:"),1,0)
+        dyn_layout.addWidget(self.prerender_pages_spin,1,1)
+        dyn_layout.addWidget(self.capture_api_checkbox,1,2)
+        dyn_layout.addWidget(self.no_rewrite_checkbox,1,3)
+        dyn_layout.addWidget(self.hook_script_btn,2,0,1,2)
+        self.dynamic_section = CollapsibleSection("Dynamic Rendering", start_collapsed=True)
+        self.dynamic_section.setContentLayout(dyn_layout)
+        card_layout.addWidget(self.dynamic_section)
+
+        # ---------- SPA ROUTER ----------
+        from PySide6.QtWidgets import QSpinBox as _QSpinBox2
+        router_layout = QGridLayout(); router_layout.setHorizontalSpacing(10); router_layout.setVerticalSpacing(6)
+        self.router_intercept_checkbox = QCheckBox("Intercept router")
+        self.router_intercept_checkbox.setEnabled(False)
+    # (Enable logic unified later via self._bind_enable)
+        self.router_hash_checkbox = QCheckBox("Include #hash"); self.router_hash_checkbox.setEnabled(False)
+    # (Enable logic unified later via self._bind_enable)
+        self.router_max_routes_spin = _QSpinBox2(); self.router_max_routes_spin.setRange(10,5000); self.router_max_routes_spin.setValue(200); self.router_max_routes_spin.setEnabled(False)
+        self.router_settle_spin = _QSpinBox2(); self.router_settle_spin.setRange(0,5000); self.router_settle_spin.setValue(350); self.router_settle_spin.setSuffix(" ms"); self.router_settle_spin.setEnabled(False)
+        self.router_wait_selector_edit = QLineEdit(); self.router_wait_selector_edit.setPlaceholderText("Wait selector (optional)"); self.router_wait_selector_edit.setEnabled(False)
+    # (Enable logic unified later via self._bind_enable)
+        self.router_allow_edit = QLineEdit(); self.router_allow_edit.setPlaceholderText("Allow regex list"); self.router_allow_edit.setEnabled(False)
+        self.router_deny_edit = QLineEdit(); self.router_deny_edit.setPlaceholderText("Deny regex list"); self.router_deny_edit.setEnabled(False)
+    # (Enable logic unified later via self._bind_enable)
+        self.router_quiet_checkbox = QCheckBox("Quiet logging"); self.router_quiet_checkbox.setEnabled(False)
+    # (Enable logic unified later via self._bind_enable)
+        router_layout.addWidget(self.router_intercept_checkbox,0,0)
+        router_layout.addWidget(self.router_hash_checkbox,0,1)
+        router_layout.addWidget(QLabel("Max routes:"),1,0)
+        router_layout.addWidget(self.router_max_routes_spin,1,1)
+        router_layout.addWidget(QLabel("Settle:"),1,2)
+        router_layout.addWidget(self.router_settle_spin,1,3)
+        router_layout.addWidget(self.router_wait_selector_edit,2,0,1,4)
+        router_layout.addWidget(QLabel("Allow patterns:"),3,0)
+        router_layout.addWidget(self.router_allow_edit,3,1,1,3)
+        router_layout.addWidget(QLabel("Deny patterns:"),4,0)
+        router_layout.addWidget(self.router_deny_edit,4,1,1,3)
+        router_layout.addWidget(self.router_quiet_checkbox,5,0)
+        self.router_section = CollapsibleSection("SPA Router", start_collapsed=True)
+        self.router_section.setContentLayout(router_layout)
+        card_layout.addWidget(self.router_section)
+        # Unified enable/disable bindings (after all related widgets created)
+        self._bind_enable(self.size_cap_checkbox, self.size_cap_value, self.size_cap_unit)
+        self._bind_enable(self.throttle_checkbox, self.throttle_value, self.throttle_unit)
+        self._bind_enable(self.auth_checkbox, self.auth_user_input, self.auth_pass_input)
+        self._bind_enable(self.parallel_checkbox, self.parallel_jobs_input)
+        self._bind_enable(self.prerender_checkbox,
+                          self.prerender_pages_spin,
+                          self.capture_api_checkbox,
+                          self.no_rewrite_checkbox,
+                          self.router_intercept_checkbox)
+        self._bind_enable(self.router_intercept_checkbox,
+                          self.router_hash_checkbox,
+                          self.router_max_routes_spin,
+                          self.router_settle_spin,
+                          self.router_wait_selector_edit,
+                          self.router_allow_edit,
+                          self.router_deny_edit,
+                          self.router_quiet_checkbox)
+
+        # ---------- INTEGRITY & ARTIFACTS ----------
+        integ_layout = QGridLayout(); integ_layout.setHorizontalSpacing(10); integ_layout.setVerticalSpacing(6)
+        self.checksums_checkbox = QCheckBox("Generate checksums")
+        self.skip_manifest_checkbox = QCheckBox("Skip manifest")
+        self.checksum_extra_edit = QLineEdit(); self.checksum_extra_edit.setPlaceholderText("Extra checksum extensions (e.g. css,js)")
+        integ_layout.addWidget(self.checksums_checkbox,0,0)
+        integ_layout.addWidget(self.skip_manifest_checkbox,0,1)
+        integ_layout.addWidget(self.checksum_extra_edit,1,0,1,2)
+        self.integrity_section = CollapsibleSection("Integrity & Artifacts", start_collapsed=True)
+        self.integrity_section.setContentLayout(integ_layout)
+        card_layout.addWidget(self.integrity_section)
+
         run_grid = QGridLayout(); run_grid.setHorizontalSpacing(10); run_grid.setVerticalSpacing(8)
 
         # Bind IP + Host Port + Container Port row(s)
@@ -1566,9 +2196,9 @@ class DockerClonerGUI(QWidget):
         self.cport_input = QSpinBox(); self.cport_input.setRange(1,65535); self.cport_input.setValue(80)
         cont_port_row.addWidget(self.lbl_cport); cont_port_row.addSpacing(6); cont_port_row.addWidget(self.cport_input); cont_port_row.addStretch(1)
 
-        run_grid.addLayout(ip_row,       0, 0, 1, 3)
-        run_grid.addLayout(host_port_row,1, 0, 1, 3)
-        run_grid.addLayout(cont_port_row,2, 0, 1, 3)
+        run_grid.addLayout(ip_row,        0, 0, 1, 3)
+        run_grid.addLayout(host_port_row, 1, 0, 1, 3)
+        run_grid.addLayout(cont_port_row, 2, 0, 1, 3)
 
         # Actions row (kept outside the collapsible Run section)
         actions_row = QHBoxLayout()
@@ -1647,15 +2277,23 @@ class DockerClonerGUI(QWidget):
         self.status_label.setMinimumHeight(h)
         self.status_label.setMaximumHeight(h)
         self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        status_shadow = QGraphicsDropShadowEffect(self.status_label); status_shadow.setBlurRadius(18); status_shadow.setOffset(0, 6); status_shadow.setColor(Qt.GlobalColor.black)
-        self.status_label.setGraphicsEffect(status_shadow)
+        # Shadow removed
         root.addWidget(self.status_label)
         # Base status text used for appending progress
         self._status_base_text = "No container running"
 
         # timers & init
         self.status_timer = QTimer(); self.status_timer.timeout.connect(self.check_container_status); self.status_timer.start(3000)
-        self.set_advanced_mode(False)
+        # Track advanced-designated sections for collapse logic
+        self._advanced_sections = [
+            self.auth_section,
+            self.perf_section,
+            self.dynamic_section,
+            self.router_section,
+            self.integrity_section,
+        ]
+        self._apply_advanced_mode()  # initialize collapsed state
+        self.set_advanced_mode(False)  # backward compatibility no-op
         self._align_label_column()
         self.refresh_run_buttons()
         # Load previous window geometry if available, then finalize sizing
@@ -1698,7 +2336,8 @@ class DockerClonerGUI(QWidget):
             right_min = int(self.right_panel.minimumWidth()) if hasattr(self, 'right_panel') else 0
             divider_w = 0
             try:
-                divider_w = int(getattr(self, 'fixed_divider', None).minimumWidth()) if hasattr(self, 'fixed_divider') and self.fixed_divider else 0
+                fd = getattr(self, 'fixed_divider', None)
+                divider_w = int(fd.minimumWidth()) if fd is not None else 0
             except Exception:
                 divider_w = 0
             # Include outer layout margins
@@ -1740,7 +2379,7 @@ class DockerClonerGUI(QWidget):
         except Exception:
             self.ui_scale = 1.0
         # Reapply stylesheet
-        self.setStyleSheet(build_dark_css(self.ui_scale))
+        self.setStyleSheet(build_light_css(self.ui_scale))
         # Update key layout paddings
         root = self.layout()
         if root is not None:
@@ -1853,6 +2492,26 @@ class DockerClonerGUI(QWidget):
     def set_advanced_mode(self, enabled: bool):
         # Collapsible section controls visibility; no-op kept for backward compatibility
         return
+
+    # ----- advanced mode internal handler -----
+    def _apply_advanced_mode(self):
+        adv = bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, 'advanced_mode_checkbox') else False
+        # Short-circuit if no change
+        prev = getattr(self, '_adv_prev', None)
+        if prev is not None and prev == adv:
+            return
+        self._adv_prev = adv
+        # If not advanced mode, collapse tracked sections (headers remain for discoverability)
+        for sec in getattr(self, '_advanced_sections', []):
+            try:
+                if not adv and sec.is_expanded():
+                    sec.set_collapsed(True)
+                elif adv and not sec.is_expanded():
+                    # Expand a couple of the most relevant advanced sections for quick access
+                    if sec in (self.perf_section, self.dynamic_section):
+                        sec.set_collapsed(False)
+            except Exception:
+                pass
 
     # ----- helpers -----
     def _align_label_column(self):
@@ -1973,28 +2632,7 @@ class DockerClonerGUI(QWidget):
         super().resizeEvent(event)
 
     def _enforce_splitter_minimums(self):
-        """Clamp splitter so neither side shrinks below its minimum width."""
-        try:
-            sizes = self.splitter.sizes()
-            if len(sizes) < 2:
-                return
-            left, right = sizes[0], sizes[1]
-            min_left = max(0, int(self.scroll_area.minimumWidth()))
-            min_right = max(0, int(self.right_panel.minimumWidth()))
-            total = max(1, left + right)
-            changed = False
-            if right < min_right:
-                right = min_right
-                left = max(0, total - right)
-                changed = True
-            if left < min_left:
-                left = min_left
-                right = max(0, total - left)
-                changed = True
-            if changed:
-                self.splitter.setSizes([left, right])
-        except Exception:
-            pass
+        return  # splitter removed; no-op
     def _finalize_sizing(self):
         # Compute an initial reasonable size that fits content width (to avoid horizontal scroll)
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -2036,7 +2674,7 @@ class DockerClonerGUI(QWidget):
 
     def _load_window_settings(self) -> bool:
         try:
-            geom = self.settings.value("geometry")
+            geom = self.settings.value("geometry") if self.settings else None
             if geom is not None:
                 self.restoreGeometry(geom)
                 return True
@@ -2046,7 +2684,8 @@ class DockerClonerGUI(QWidget):
 
     def closeEvent(self, event):
         try:
-            self.settings.setValue("geometry", self.saveGeometry())
+            if self.settings:
+                self.settings.setValue("geometry", self.saveGeometry())
         except Exception:
             pass
         super().closeEvent(event)
@@ -2055,7 +2694,7 @@ class DockerClonerGUI(QWidget):
     def _load_recent_urls(self):
         items = []
         try:
-            val = self.settings.value("recent_urls", [])
+            val = self.settings.value("recent_urls", []) if self.settings else []
             if isinstance(val, list):
                 items = [str(v) for v in val if v]
             elif isinstance(val, str):
@@ -2079,7 +2718,8 @@ class DockerClonerGUI(QWidget):
         urls = [url] + [u for u in current if u and u != url]
         urls = urls[:10]
         try:
-            self.settings.setValue("recent_urls", urls)
+            if self.settings:
+                self.settings.setValue("recent_urls", urls)
         except Exception:
             pass
         # Update combo box items
@@ -2240,11 +2880,39 @@ class DockerClonerGUI(QWidget):
             pre_existing_count=pre_existing, pre_partial_count=pre_partial,
             estimate_first=estimate_first, parallel_jobs=parallel_jobs,
             disable_js=disable_js,
-            cookies_file=getattr(self, 'imported_cookies_file', None) if self.use_cookies_checkbox.isChecked() else None
+            prerender=(self.prerender_checkbox.isChecked() if hasattr(self,'prerender_checkbox') and self.prerender_checkbox else False),
+            prerender_max_pages=(self.prerender_pages_spin.value() if hasattr(self,'prerender_pages_spin') and self.prerender_pages_spin else 40),
+            capture_api=(self.capture_api_checkbox.isChecked() if hasattr(self,'capture_api_checkbox') and self.capture_api_checkbox else False),
+            hook_script=(self.hook_script_path if hasattr(self,'hook_script_path') else None),
+            rewrite_urls=not (self.no_rewrite_checkbox.isChecked() if hasattr(self,'no_rewrite_checkbox') and self.no_rewrite_checkbox else False),
+            router_intercept=(self.router_intercept_checkbox.isChecked() if hasattr(self,'router_intercept_checkbox') and self.router_intercept_checkbox else False),
+            router_include_hash=(self.router_hash_checkbox.isChecked() if hasattr(self,'router_hash_checkbox') and self.router_hash_checkbox else False),
+            router_max_routes=(self.router_max_routes_spin.value() if hasattr(self,'router_max_routes_spin') and self.router_max_routes_spin else 200),
+            router_settle_ms=(self.router_settle_spin.value() if hasattr(self,'router_settle_spin') and self.router_settle_spin else 350),
+            router_wait_selector=(self.router_wait_selector_edit.text().strip() or None) if (hasattr(self,'router_wait_selector_edit') and self.router_wait_selector_edit) else None,
+            router_allow=([p.strip() for p in self.router_allow_edit.text().split(',') if p.strip()] if (hasattr(self,'router_allow_edit') and self.router_allow_edit.isEnabled() and self.router_allow_edit.text().strip()) else None),
+            router_deny=([p.strip() for p in self.router_deny_edit.text().split(',') if p.strip()] if (hasattr(self,'router_deny_edit') and self.router_deny_edit.isEnabled() and self.router_deny_edit.text().strip()) else None),
+            cookies_file=getattr(self, 'imported_cookies_file', None) if self.use_cookies_checkbox.isChecked() else None,
+            no_manifest=(self.skip_manifest_checkbox.isChecked() if hasattr(self,'skip_manifest_checkbox') and self.skip_manifest_checkbox else False),
+            checksums=(self.checksums_checkbox.isChecked() if hasattr(self,'checksums_checkbox') and self.checksums_checkbox else False)
         )
+        if hasattr(self, 'router_quiet_checkbox') and self.router_quiet_checkbox.isEnabled():
+            worker.router_quiet = self.router_quiet_checkbox.isChecked()
         self.clone_thread = worker
         worker.progress.connect(self.update_console)
         worker.total_progress.connect(self.update_total_progress)
+        try:
+            worker.bandwidth.connect(self.update_bandwidth)
+        except Exception:
+            pass
+        try:
+            worker.api_capture.connect(self.update_api_capture)
+        except Exception:
+            pass
+        try:
+            worker.router_count.connect(self.update_router_count)
+        except Exception:
+            pass
         worker.finished.connect(self.clone_finished)
         # status bar will show progress during tasks
         # Disable clone button during operation to prevent double-starts
@@ -2517,7 +3185,8 @@ class DockerClonerGUI(QWidget):
         """Show a dialog listing missing dependencies with per-item copy install commands."""
         dlg = QDialog(self); dlg.setWindowTitle('Missing Dependencies')
         try:
-            dlg.setWindowModality(Qt.ApplicationModality.ApplicationModal)
+            from PySide6.QtCore import Qt as _Qt
+            dlg.setWindowModality(_Qt.WindowModality.ApplicationModal)
         except Exception:
             pass
         v = QVBoxLayout(dlg)
@@ -2676,13 +3345,67 @@ class DockerClonerGUI(QWidget):
     def update_total_progress(self, percent: int, phase: str):
         phase_title = {
             "clone": "Cloning",
+            "prerender": "Prerender (dynamic pages)",
             "build": "Docker build",
             "cleanup": "Cleanup"
         }.get(phase, phase.title())
-        # Show total progress in the status bar (spanning bottom), appended to base status
+        self._current_percent = percent
+        self._current_phase_title = phase_title
+        self._rebuild_status_line()
+
+    def update_bandwidth(self, rate: str):
+        self._current_rate = rate
+        self._rebuild_status_line()
+
+    def update_api_capture(self, count: int):
+        # Throttle UI refresh to avoid excessive updates on high-frequency API responses
+        import time
+        now = time.time()
+        last_time = getattr(self, '_last_api_ui_emit_time', 0.0)
+        last_count = getattr(self, '_last_api_ui_count', -1)
+        self._current_api_count = count
+        # Conditions to update: first time, count divisible by 5, time elapsed >0.4s, or large jump (>20)
+        if (last_count == -1 or
+            count % 5 == 0 or
+            (now - last_time) > 0.4 or
+            (count - last_count) > 20):
+            self._last_api_ui_emit_time = now
+            self._last_api_ui_count = count
+            self._rebuild_status_line()
+
+    def update_router_count(self, count: int):
+        import time
+        now = time.time()
+        last_time = getattr(self, '_last_router_ui_emit_time', 0.0)
+        last_count = getattr(self, '_last_router_ui_count', -1)
+        self._current_router_count = count
+        if (last_count == -1 or
+            count % 3 == 0 or
+            (now - last_time) > 0.5 or
+            (count - last_count) > 10):
+            self._last_router_ui_emit_time = now
+            self._last_router_ui_count = count
+            self._rebuild_status_line()
+
+    def _rebuild_status_line(self):
         base = getattr(self, '_status_base_text', '') or ''
-        sep = " • " if base else ""
-        self._set_status_text_elided(f"{base}{sep}Total progress: {percent}% • {phase_title}")
+        parts = []
+        if hasattr(self, '_current_percent') and hasattr(self, '_current_phase_title'):
+            parts.append(f"Total progress: {self._current_percent}% • {self._current_phase_title}")
+        if hasattr(self, '_current_rate'):
+            parts.append(f"Rate: {self._current_rate}")
+        if hasattr(self, '_current_api_count'):
+            parts.append(f"API: {self._current_api_count}")
+        if hasattr(self, '_current_router_count'):
+            parts.append(f"Routes: {self._current_router_count}")
+        suffix = " • ".join(parts) if parts else ''
+        if base and suffix:
+            text = f"{base} • {suffix}"
+        elif base:
+            text = base
+        else:
+            text = suffix
+        self._set_status_text_elided(text)
 
 # ---------- main ----------
 if __name__ == "__main__":
