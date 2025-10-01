@@ -301,13 +301,12 @@ class DockerClonerGUI(QWidget):
         # Apply a stylesheet with variant colors
         style="""
 QPushButton {
-  padding:4px 10px;
-  font-weight:500;
-  border:1px solid #5a5a5a;
-  border-radius:4px;
-  background:#2e2e2e;
-  color:#f0f0f0;
-  transition: background 120ms ease, border-color 120ms ease;
+    padding:4px 10px;
+    font-weight:500;
+    border:1px solid #5a5a5a;
+    border-radius:4px;
+    background:#2e2e2e;
+    color:#f0f0f0;
 }
 QPushButton[kind="primary"] { background:#1e6ad6; border-color:#1e6ad6; }
 QPushButton[kind="primary"]:hover { background:#2578ef; }
