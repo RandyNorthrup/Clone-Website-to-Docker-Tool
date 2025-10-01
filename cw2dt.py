@@ -7,6 +7,14 @@ from datetime import datetime
 # ---------- helpers ----------
 PARTIAL_SUFFIXES = {".tmp", ".part", ".partial", ".download"}
 
+# ---- default configuration constants (centralize scattered magic numbers) ----
+DEFAULT_PRERENDER_MAX_PAGES = 40
+DEFAULT_ROUTER_MAX_ROUTES = 200
+DEFAULT_ROUTER_SETTLE_MS = 350  # ms
+DEFAULT_CONTAINER_PORT = 80
+DEFAULT_HOST_PORT = 8080
+
+
 def count_files_and_partials(base_path: str):
     total = 0
     partials = 0
@@ -974,13 +982,13 @@ class CloneThread(QThread):
     finished = Signal(str, bool, bool)  # (log, docker_build_success, clone_success)
 
     def __init__(self, url, docker_name, save_path, build_docker,
-                 host_port=8080, size_cap=None, throttle=None, host_ip="127.0.0.1",
-                 container_port=80, http_user=None, http_password=None,
+                 host_port=DEFAULT_HOST_PORT, size_cap=None, throttle=None, host_ip="127.0.0.1",
+                 container_port=DEFAULT_CONTAINER_PORT, http_user=None, http_password=None,
                  pre_existing_count=0, pre_partial_count=0,
                  estimate_first=False, parallel_jobs=1,
                  disable_js=False,
-                 prerender=False, prerender_max_pages=40, capture_api=False, hook_script=None, rewrite_urls=True,
-                 router_intercept=False, router_include_hash=False, router_max_routes=200, router_settle_ms=350, router_wait_selector=None,
+                 prerender=False, prerender_max_pages=DEFAULT_PRERENDER_MAX_PAGES, capture_api=False, hook_script=None, rewrite_urls=True,
+                 router_intercept=False, router_include_hash=False, router_max_routes=DEFAULT_ROUTER_MAX_ROUTES, router_settle_ms=DEFAULT_ROUTER_SETTLE_MS, router_wait_selector=None,
                  router_allow=None, router_deny=None,
                  cookies_file: str | None = None,
                  no_manifest: bool = False,
