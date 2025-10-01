@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cw2dt"
+version = "1.1.1"
+description = "Clone Website to Docker Tool: wget2 + optional prerender + Docker packaging (GUI + headless)."
+authors = [ { name = "Randy Northrup" } ]
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["wget2","docker","website-mirror","playwright","static-site","prerender"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Software Development :: Build Tools",
+  "Intended Audience :: Developers"
+]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6.0"]
+prerender = ["playwright>=1.44"]
+extras = ["browser_cookie3"]
+
+[project.scripts]
+cw2dt = "cw2dt:main"
+
+[tool.setuptools]
+py-modules = ["cw2dt","cw2dt_core","cw2dt_gui"]
+include-package-data = true
+
+[tool.setuptools.exclude-package-data]
+"" = ["tests/*"]
+
+[project.urls]
+Homepage = "https://github.com/RandyNorthrup/Clone-Website-to-Docker-Tool"
+Issues = "https://github.com/RandyNorthrup/Clone-Website-to-Docker-Tool/issues"
