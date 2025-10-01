@@ -1,207 +1,110 @@
 # Clone Website to Docker Tool
 
-A desktop utility to clone any public website to a local folder using **wget2** (parallel, resumable), then package and serve it with Docker + Nginx. Supports one-click build/run, folder serving (no build), custom bind IP, port mapping, cookie import, and a modern dark UI. Also includes a full-featured headless CLI for automation.
+A desktop and CLI utility to clone any public or private website to a local folder using **wget2** (parallel, resumable, authenticated), then package and serve it with Docker + Nginx. Features a modern dark UI, advanced options, and full automation support.
 
 ---
 
-## ✨ Features
+## Features
 
-- **Point-and-click cloning** with `wget2 --mirror` (parallel, resumable, link conversion, assets, no-parent)
-- **Self-contained output**: Dockerfile, nginx.conf, README per project
-- **Build Docker image** (optional) and clean up inputs after success
-- **Serve From Folder (no build)**: bind-mount + minimal Nginx config
-- **Networking controls**: Bind IP, Host Port, Container Port
-- **Cookie import**: Scan browser cookies for authenticated downloads
-- **Advanced options**: Download quota, rate throttling, parallel jobs, JS disabling
-- **Headless CLI**: Full-featured command-line mode for automation
-- **Live status**: Uptime, port mapping, project path, auto-refresh
-- **Safety**: Detects port in use, disables actions while running, auto-enables buttons
-- **Modern dark UI**: Rounded corners, icon header, responsive layout
+- **Point-and-click cloning** (GUI) and full-featured CLI (`--headless`)
+- **wget2** for fast, parallel, resumable downloads
+- **Authenticated cloning**:
+  - HTTP username/password
+  - Browser cookie import (via `browser_cookie3`)
+- **Advanced options**:
+  - Download quota (size cap)
+  - Bandwidth throttling
+  - Parallel jobs (configurable)
+  - JavaScript disabling (strip scripts, enforce CSP)
+  - Pre-clone estimation (spider mode)
+- **Self-contained output**:
+  - Dockerfile, nginx.conf, README, imported_cookies.txt
+- **Docker integration**:
+  - Build Docker image after clone
+  - Serve from folder (no build) using bind-mount and minimal nginx config
+  - Custom bind IP, host port, container port
+  - Live status bar (uptime, port mapping, project path)
+  - One-click run/stop, open in browser, copy URL
+- **Resume failed/partial clones**
+- **Cross-platform**: macOS, Linux, Windows (with PowerShell support)
+- **Dependency management**: auto-detects missing wget2, Docker, browser_cookie3, and provides install commands
+- **Modern dark UI**: responsive, scalable, with icon header
+- **Recent URLs**: remembers last 10 URLs for quick access
 
 ---
 
-## 📦 Requirements
+## Requirements
 
 - **Python** 3.9+
 - **PySide6** (`pip install PySide6`) for GUI
 - **wget2** (not wget) on PATH
-  - macOS: `brew install wget2`
-  - Linux: `sudo apt-get install -y wget2` (Debian/Ubuntu) or use your distro's package manager
-  - Windows: Use MSYS2 (`pacman -S mingw-w64-ucrt-x86_64-wget2`) or build from source
-- **Docker** (optional, required to build/run)
-  - macOS: `brew install --cask docker`
-  - Windows: `winget install Docker.DockerDesktop`
-  - Linux: `sudo apt-get install -y docker.io` (or distro equivalent)
-- **browser_cookie3** (`pip install browser_cookie3`) for cookie import (optional, CLI and GUI)
-
-> The app will still **clone** without Docker installed. Run buttons are disabled until Docker is available.
+- **Docker** (for build/run/serve)
+- **browser_cookie3** (`pip install browser_cookie3`) for cookie import (optional, but recommended for private/authenticated sites)
+- **nginx** is not required on your host; the tool uses the official `nginx:alpine` Docker image
 
 ---
 
-## 🚀 Quick Start
+## Usage
 
-1. **Install dependencies**
-   ```bash
-   pip install PySide6 browser_cookie3
-   # Install wget2 and Docker as above
-   ```
-2. **Run the app**
-   ```bash
-   python cw2dt.py
-   ```
-3. **Prepare a project**
-   - Enter Website URL
-   - Choose Destination Folder
-   - (Optional) Build Docker image and set image name
-   - (Optional) Advanced: quota, throttle, parallel jobs, JS disable, cookie import
-   - Set Bind IP, Host Port, Container Port
-   - Click **Clone  Prepare**
-4. **Serve**
-   - **Run Created Container** (built image)
-   - **Serve From Folder (no build)** (bind-mounts folder into nginx:alpine)
-   - Use **Open in Browser** or **Copy URL**
-5. **Stop**
-   - Click **Stop Container**
+### GUI
+
+- Enter website URL and destination folder
+- (Optional) Enable build, set Docker image name
+- (Optional) Advanced: quota, throttle, parallel jobs, JS disable, cookie import
+- Set bind IP, host port, container port
+- Click **Clone  Prepare**
+- Serve via **Run Created Container** or **Serve From Folder (no build)**
+- Stop container, open in browser, copy URL
+
+### CLI
+
+- All features available via `--headless` mode
+- Example:
+  ```bash
+  python cw2dt.py --headless --url "https://example.com" --dest "/path/to/output" --docker-name "site" --build --jobs 8 --auth-user "user" --auth-pass "pass" --estimate --serve-folder --bind-ip 0.0.0.0 --host-port 8080 --container-port 80
+  ```
 
 ---
 
-## 🧭 UI & CLI Tour
-
-- **Source**: Website URL, Destination folder
-- **Build**: Enable image build, set Docker image name, quota/throttle, parallel jobs, JS disable
-- **Run**: Bind IP, Host Port, Container Port
-- **Cookie Import**: Scan browser cookies for authenticated downloads
-- **Status bar**: Live refresh, mode, mapping, uptime, project path
-- **Buttons**: Auto-enable/disable based on state
-- **CLI**: All features available via `--headless` mode (see below)
-
----
-
-## 🗂️ Output Layout
+## Output Layout
 
 ```
 <Destination>/<project_name>/
-  Dockerfile                # EXPOSE <container_port>
-  nginx.conf                # listen <container_port>
-  <website content>         # mirrored files (removed after successful build)
-  README_<project>.md       # per-project usage notes (always regenerated last)
-  imported_cookies.txt      # if cookies imported
-  .folder.default.<port>.conf  # for "Serve From Folder"
+  Dockerfile
+  nginx.conf
+  <website content>
+  README_<project>.md
+  imported_cookies.txt
+  .folder.default.<port>.conf
 ```
 
-> After a successful build, the tool cleans up inputs and leaves only the README. To serve from folder again, re-prepare the project.
-
 ---
 
-## 🔧 How It Works
+## Troubleshooting
 
-1. Clone with `wget2` (parallel, resumable, quota/throttle, cookies, JS disable)
-2. Detect site root (first folder with index file)
-3. Write Dockerfile and nginx.conf for chosen container port
-4. Build Docker image (optional)
-5. Run container: `docker run -p <bind_ip>:<host_port>:<container_port> <image>`
-6. Serve from folder: bind-mount folder and config into nginx:alpine
-
----
-
-## 🔒 Legal & Ethics
-
-- The tool sets `-e robots=off` and `--mirror`. **Only clone content you have the right to copy** and **respect site Terms of Service**, copyright, and robots.txt when applicable.
-- Avoid cloning authenticated, rate-limited, or copyrighted resources without permission.
-- You are responsible for how you use this tool.
-
----
-
-## 🧪 Common Workflows
-
-### Build & run a portable image
-1. Enter URL, destination folder, enable build, set image name
-2. Clone & build
-3. Run Created Container
-
-### Quick local preview (no build)
-1. Clone (build unchecked)
-2. Serve From Folder (no build)
-3. Stop when finished
-
-### Authenticated clone
-- Scan browser cookies, enable "Use imported cookies"
-- Clone site with authentication
-
-### Expose to LAN
-- Set Bind IP to your LAN IP (Detect LAN IP)
-- Choose Host Port open on your firewall/router
-- LAN users visit `http://<LAN_IP>:<Host Port>`
-
----
-
-## 🆘 Troubleshooting
-
-- **wget2 not found**: Install via your OS package manager (see Requirements)
-- **Docker not found**: Buttons disabled. Install Docker and reopen the app
-- **Permission denied (Linux)**: Add your user to the `docker` group and re-login:
-  ```bash
-  sudo usermod -aG docker $USER
-  ```
-- **Port already in use**: App prompts for another port, or change Bind IP
-- **Cloning fails/partial**: Some sites need dynamic backends; static mirror may not work fully
-- **Slow/huge downloads**: Use Advanced Options (quota/throttle)
-- **Open in Browser does nothing**: Ensure container is running, firewall allows Host Port
+- **Missing dependencies**: Use the GUI's "Fix Dependencies…" button for install commands
+- **Permission denied (Linux)**: Add your user to the `docker` group and re-login
+- **Port in use**: App prompts for another port
+- **Cloning fails/partial**: Resume supported; check authentication/cookies
 - **Icons not visible**: Place `web_logo.png`, `arrow_right.png`, `docker_logo.png` in `./images/` or script dir
-- **Cookie import fails**: Ensure `browser_cookie3` is installed and browser profile is accessible
 
 ---
 
-## 🛠️ Building a Standalone App (optional)
+## Roadmap
 
-Use PyInstaller:
-```bash
-pip install pyinstaller
-pyinstaller -y --noconfirm --windowed --name "Clone Website to Docker Tool" cw2dt.py
-```
-- Add `--icon path/to/icon.ico/icns` if you have one
-- Bundle `images/` alongside the executable
+- Built-in bandwidth monitor and progress visualization
+- Additional authentication methods (OAuth, SSO, etc.)
+- More advanced error handling and reporting
+- Enhanced site compatibility (dynamic sites, SPA support)
 
 ---
 
-## 🔁 Command Reference
-
-- **Run created image**
-  ```bash
-  docker run -d -p <bind_ip>:<host_port>:<container_port> <image_tag>
-  ```
-- **Serve from folder (no build)**
-  ```bash
-  docker run -d -p <bind_ip>:<host_port>:<container_port> \
-    -v "<abs_project_dir>":/usr/share/nginx/html \
-    -v "<conf>.conf":/etc/nginx/conf.d/default.conf:ro \
-    nginx:alpine
-  ```
-- **Windows PowerShell**: Use double quotes for paths and backticks for line continuation
-
----
-
-## 📄 License
-
-MIT License. See [LICENSE](LICENSE).
-
----
-
-## 🗺️ Roadmap
-
-- Optional auth for private sites (cookies/session export)
-- Parallel fetch or alternate crawlers
-- Built-in bandwidth monitor and progress
-- Light theme toggle
-
----
-
-### Credits
+## Credits
 
 - **Nginx** (Alpine), **Docker**, **wget2**, **PySide6**, **browser_cookie3**
 
 ---
 
-## 👤 Author
+## Author
 
-**Randy Northrup**
+Randy Northrup
