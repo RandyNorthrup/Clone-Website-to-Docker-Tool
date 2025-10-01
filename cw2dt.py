@@ -2307,6 +2307,11 @@ class DockerClonerGUI(QWidget):
             pass
         self.console.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.right_col.addWidget(self.console, 1)
+        # Export log button row
+        export_row = QHBoxLayout()
+        self.save_log_btn = QPushButton("Save Log…"); self.save_log_btn.setObjectName("ghostBtn"); self.save_log_btn.clicked.connect(self.save_console_log)
+        export_row.addWidget(self.save_log_btn); export_row.addStretch(1)
+        self.right_col.addLayout(export_row)
 
         # Total progress (compact line)
         # (status bar carries total progress during tasks)
@@ -2361,6 +2366,25 @@ class DockerClonerGUI(QWidget):
             return
         s = self.ui_scale
         layout.setContentsMargins(int(left*s), int(top*s), int(right*s), int(bottom*s))
+
+    def save_console_log(self):
+        """Save the current console log to a user-chosen file."""
+        try:
+            text = self.console.toPlainText()
+            if not text.strip():
+                QMessageBox.information(self, "Save Log", "Console log is empty.")
+                return
+            path, _ = QFileDialog.getSaveFileName(self, "Save Log", "clone_log.txt", "Text Files (*.txt)")
+            if not path:
+                return
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            QMessageBox.information(self, "Save Log", f"Log saved to: {path}")
+        except Exception as e:
+            try:
+                QMessageBox.warning(self, "Save Log", f"Failed to save log: {e}")
+            except Exception:
+                pass
 
     def _update_left_min_width(self):
         try:
