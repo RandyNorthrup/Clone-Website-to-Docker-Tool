@@ -8,6 +8,9 @@ from datetime import datetime
 # ---------- helpers ----------
 PARTIAL_SUFFIXES = {".tmp", ".part", ".partial", ".download"}
 
+# Environment flag to allow importing helper functions without bringing in Qt (used by tests)
+CW2DT_NO_QT = bool(os.environ.get('CW2DT_NO_QT'))
+
 # ---- default configuration constants (centralize scattered magic numbers) ----
 DEFAULT_PRERENDER_MAX_PAGES = 40
 DEFAULT_ROUTER_MAX_ROUTES = 200
@@ -33,47 +36,64 @@ def _selftest_verification_parsing():  # dev aid, invoked via --selftest-verific
  # (restored verification helpers header)
 
 # ---- verification helpers (shared GUI + headless) ----
+_VERIFICATION_RE = None
 def parse_verification_summary(text: str):
     """Parse verification stdout summary lines into a dict.
-    Pattern: OK=\\d+ Missing=\\d+ Mismatched=\\d+ Total=\\d+
+    Pattern: OK=\d+ Missing=\d+ Mismatched=\d+ Total=\d+
+    Cached regex compiled on first use to avoid recompilation in repeated calls.
     """
     if not text:
         return {'ok':None,'missing':None,'mismatched':None,'total':None}
-    import re
-    m_re = re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
+    global _VERIFICATION_RE
+    if _VERIFICATION_RE is None:
+        import re as _re
+        _VERIFICATION_RE = _re.compile(r"OK=(\d+) Missing=(\d+) Mismatched=(\d+) Total=(\d+)")
     for line in text.splitlines():
-        m = m_re.search(line)
+        m = _VERIFICATION_RE.search(line)
         if m:
             ok, missing, mismatched, total = map(int, m.groups())
             return {'ok':ok,'missing':missing,'mismatched':mismatched,'total':total}
     return {'ok':None,'missing':None,'mismatched':None,'total':None}
 
 def run_verification(manifest_path: str, fast: bool=True, docker_name: str|None=None, project_dir: str|None=None, readme: bool=True, output_cb=None):
+    """Invoke verification script and enrich manifest/README.
+    Returns: (passed: bool, stats: dict)
+    """
     import json, subprocess as _sp, sys as _sys, os as _os
     if not manifest_path or not _os.path.exists(manifest_path):
         return False, {'ok':None,'missing':None,'mismatched':None,'total':None}
-    cmd=[_sys.executable,_os.path.join(_os.path.dirname(__file__),'verify_checksums.py'),'--manifest',manifest_path]
+    script = _os.path.join(_os.path.dirname(__file__), 'verify_checksums.py')
+    cmd=[_sys.executable, script, '--manifest', manifest_path]
     if fast:
         cmd.append('--fast-missing')
     try:
         res=_sp.run(cmd,capture_output=True,text=True)
     except Exception as e:
-        if output_cb: output_cb(f"[verify] error launching verifier: {e}");
+        if output_cb: output_cb(f"[verify] error launching verifier: {e}")
         return False, {'ok':None,'missing':None,'mismatched':None,'total':None}
-    if res.stdout and output_cb:
-        for line in res.stdout.splitlines(): output_cb(line)
-    stats=parse_verification_summary(res.stdout or '')
-    passed = (res.returncode==0)
-    # manifest enrich
+    stdout = res.stdout or ''
+    if stdout and output_cb:
+        for line in stdout.splitlines():
+            output_cb(line)
+    stats = parse_verification_summary(stdout)
+    passed = (res.returncode == 0)
+    # Single read/update/write cycle
     try:
-        with open(manifest_path,'r',encoding='utf-8') as mf: data=json.load(mf)
-        data['verification']={'status':'passed' if passed else 'failed','ok':stats['ok'],'missing':stats['missing'],'mismatched':stats['mismatched'],'total':stats['total'],'fast_missing':fast}
-        with open(manifest_path,'w',encoding='utf-8') as mf: json.dump(data,mf,indent=2)
-    except Exception: pass
+        with open(manifest_path,'r',encoding='utf-8') as mf:
+            data=json.load(mf)
+        data['verification']={
+            'status':'passed' if passed else 'failed',
+            'ok':stats['ok'],'missing':stats['missing'],'mismatched':stats['mismatched'],'total':stats['total'],
+            'fast_missing':fast
+        }
+        with open(manifest_path,'w',encoding='utf-8') as mf:
+            json.dump(data,mf,indent=2)
+    except Exception:
+        pass
     if readme and docker_name and project_dir:
         try:
-            rd=os.path.join(project_dir,f"README_{docker_name}.md")
-            if os.path.exists(rd):
+            rd=_os.path.join(project_dir,f"README_{docker_name}.md")
+            if _os.path.exists(rd):
                 with open(rd,'a',encoding='utf-8') as rf:
                     rf.write("\n### Verification Result\n")
                     if passed and stats['ok'] is not None and stats['total'] is not None:
@@ -82,7 +102,8 @@ def run_verification(manifest_path: str, fast: bool=True, docker_name: str|None=
                         rf.write("Passed\n")
                     else:
                         rf.write(f"Failed (ok={stats['ok']} missing={stats['missing']} mismatched={stats['mismatched']} total={stats['total']})\n")
-        except Exception: pass
+        except Exception:
+            pass
     return passed, stats
 
 # Reintroduce basic helpers (some code below references these)
@@ -842,13 +863,64 @@ if __name__ == '__main__':
         sys.exit(headless_main(argv))
 
 # After headless early-exit, import Qt for GUI definitions below
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
-    QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
-)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
-from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
+if not CW2DT_NO_QT:
+    from PySide6.QtWidgets import (
+        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
+        QFileDialog, QTextEdit, QCheckBox, QComboBox, QSpinBox, QInputDialog, QFrame, QSizePolicy,
+        QMessageBox, QScrollArea, QLayout, QDialog, QProgressBar, QSplitter, QSplitterHandle
+    )
+    from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
+    from PySide6.QtGui import QGuiApplication, QFontMetrics, QPixmap, QIcon
+else:
+    # Minimal stubs for non-GUI test import context
+    class QWidget: ...
+    class QThread: ...
+    class Signal:
+        def __init__(self,*a,**k): pass
+        def connect(self,*a,**k): pass
+        def emit(self,*a,**k): pass
+    class QTimer: ...
+    class QSettings: ...
+    class QApplication: ...
+    class QLabel: ...
+    class QVBoxLayout: ...
+    class QHBoxLayout: ...
+    class QGridLayout: ...
+    class QLineEdit: ...
+    class QPushButton: ...
+    class QFileDialog: ...
+    class QTextEdit: ...
+    class QCheckBox: ...
+    class QComboBox: ...
+    class QSpinBox: ...
+    class QInputDialog: ...
+    class QFrame: ...
+    class QSizePolicy: ...
+    class QMessageBox: ...
+    class QScrollArea: ...
+    class QLayout: ...
+    class QDialog: ...
+    class QProgressBar: ...
+    class QSplitter: ...
+    class QSplitterHandle: ...
+    class QGuiApplication:
+        @staticmethod
+        def clipboard():
+            class _C:
+                def setText(self,*a,**k): pass
+            return _C()
+        @staticmethod
+        def primaryScreen(): return None
+    class QFontMetrics: ...
+    class QPixmap: ...
+    class QIcon: ...
+    class Qt:
+        class AspectRatioMode: KeepAspectRatio=0
+        class TransformationMode: SmoothTransformation=0
+        class AlignmentFlag: AlignCenter=0
+        class WidgetAttribute: WA_StyledBackground=0
+        class Orientation: Horizontal=0
+        class CursorShape: PointingHandCursor=0
 
 def image_exists_locally(image_name: str) -> bool:
     if not image_name:
