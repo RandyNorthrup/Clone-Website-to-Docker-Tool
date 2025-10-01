@@ -1,1 +1,50 @@
+#############################
+# Core GUI requirement
+#############################
 PySide6
+
+#############################
+# Optional CLI / UX enhancements
+# Install for colorful rich progress bar: use --progress=rich
+#############################
+rich
+
+#############################
+# Optional dynamic prerender (headless browser automation)
+# After installing Playwright you typically also run:
+#   playwright install chromium
+#############################
+playwright
+
+#############################
+# Optional: Browser cookie import to reuse session auth
+#############################
+browser_cookie3
+
+#############################
+# Optional: Safer HTML parsing (if future plugins/extensions need it)
+# (Included here as a common utility; not strictly required now.)
+#############################
+beautifulsoup4
+
+#############################
+# Optional: Fast HTML5 parser backend leveraged by BeautifulSoup (if installed)
+#############################
+lxml
+
+#############################
+# Optional: For potential future JSON schema validation of events / manifest
+#############################
+jsonschema
+
+#############################
+# Optional: HTTP client utilities that some user hook scripts may rely on
+#############################
+httpx
+
+#############################
+# Testing dependencies (not required at runtime). Install with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+# We keep them separate to keep the base environment slim.
+#############################
+# (See generated requirements-dev.txt you can create if desired.)
