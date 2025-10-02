@@ -218,6 +218,9 @@ Prerender & Dynamic:
 - `--prerender` Enable Playwright dynamic DOM capture
 - `--prerender-max-pages N` Cap prerender traversal (default 40)
 - `--capture-api` Persist application/json responses into `_api/`
+- `--capture-api-types TYPES` Capture additional content-types (comma or slash separated). Example: `--capture-api-types application/json,text/csv,application/xml`.
+- `--capture-api-binary` Include common binary API responses (pdf, images, audio, video, octet-stream). Saved with inferred or fallback extensions under `_api/`.
+- `--capture-storage` Capture `localStorage` + `sessionStorage` snapshot for each prerendered page into `_storage/` mirroring the HTML path with `.storage.json` suffix.
 - `--hook-script PATH` Python file exporting `on_page(page, url, context)`
 - `--no-url-rewrite` Keep absolute origin URLs (skip origin→relative rewrite)
 
@@ -284,9 +287,12 @@ When `--prerender` (or the GUI checkbox) is enabled:
 2. Playwright launches headless Chromium and begins exploring from the start URL.
 3. Each visited page's fully rendered DOM (`page.content()`) overwrites / creates the corresponding HTML file.
 4. Links (`<a href>`) inside the same origin are queued until the `--prerender-max-pages` limit is hit.
-5. If `--capture-api` is set, JSON/XHR responses with `Content-Type: application/json` are stored under `_api/` mirroring the path (adding `.json`).
-6. If a `--hook-script` is provided and exports `on_page(page, url, context)`, it is invoked before HTML extraction (ideal for login flows, expanding lazy content, or scraping single-page app states).
-7. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
+5. If `--capture-api` is set, matching API/XHR/fetch responses are stored under `_api/` mirroring the request path. By default only `application/json` is captured. Extend or narrow capture with `--capture-api-types` (comma or slash separated prefixes, e.g. `application/json,text/plain,text/csv`). Add `--capture-api-binary` to also persist common binary types (`application/pdf`, `application/octet-stream`, `image/*`, `audio/*`, `video/*`). Text responses are UTF‑8 written with a mapped extension; binary responses are written verbatim (fallback `.bin`).
+6. If `--capture-storage` is enabled, a snapshot of `localStorage` and `sessionStorage` for the page is written under `_storage/` with the same relative path as the HTML file but ending in `.storage.json` (e.g. `about/index.storage.json`).
+7. If a `--hook-script` is provided and exports `on_page(page, url, context)`, it is invoked before HTML extraction (ideal for login flows, expanding lazy content, or scraping single-page app states).
+8. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
+9. The prerender queue stops when either the page limit is reached or there are no more same‑origin links/routes to process.
+8. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
 
 ### Live Metrics
 
@@ -366,7 +372,13 @@ python cw2dt.py --headless \
   --jobs 12 \
   --prerender --prerender-max-pages 120 \
   --router-intercept --router-max-routes 350 --router-settle-ms 900 \
-  --capture-api \
+  --capture-api --capture-api-types application/json,text/plain --capture-api-binary --capture-storage \
+- `_api/` mirrors the URL path of captured responses. Directory indices (`/path/`) become `path/index.<ext>`.
+- Extension mapping heuristics: json -> `.json`, csv -> `.csv`, xml -> `.xml`, graphql -> `.graphql(.json)`, plain -> `.txt`; binary falls back to original inferred extension or `.bin`.
+- Provide multiple types with either commas or slashes: `--capture-api-types application/json,text/csv` or `--capture-api-types application/json/text/csv`.
+- Storage snapshots are per prerendered HTML page; only pages that actually have storage entries produce a `.storage.json` file.
+- Storage files include: `{ "url": <page_url>, "localStorage": {..}, "sessionStorage": {..} }`.
+- Checksums (when enabled) currently include HTML and captured JSON (and any extra extensions you list); binary API assets are not hashed unless you add their extensions via `--checksum-ext`.
   --hook-script ./hooks/fidelity.py \
   --checksums --checksum-ext css,js,png,jpg,svg,json \
   --verify-after --incremental --diff-latest
