@@ -192,6 +192,14 @@ class DockerClonerGUI(QWidget):
         for w in (self.chk_disable_js, QLabel('Download Threads:'), self.spin_threads, self.size_cap, self.throttle, self.auth_user, self.auth_pass, self.chk_import_browser_cookies):
             misc.addWidget(w)
         misc.addLayout(cr); misc.addLayout(pr); config_v.addWidget(misc)
+        # Troubleshooting helper section
+        trouble=_CollapsibleBox('Troubleshooting'); self._sections.append(trouble)
+        self.user_agent_in=QLineEdit(); self.user_agent_in.setPlaceholderText('Custom User-Agent (optional)')
+        self.extra_wget_args_in=QLineEdit(); self.extra_wget_args_in.setPlaceholderText('Extra wget2 args e.g. --retry-on-http-error=429,500,503')
+        self.btn_diagnose=QPushButton('Diagnose Last Error')
+        self.btn_diagnose.clicked.connect(self._run_diagnostics)
+        for w in (QLabel('User-Agent Override:'), self.user_agent_in, QLabel('Extra wget2 Args:'), self.extra_wget_args_in, self.btn_diagnose): trouble.addWidget(w)
+        config_v.addWidget(trouble)
         config_v.addStretch(1)
         # Footer reset defaults button spanning width
         from PySide6.QtWidgets import QFrame
@@ -346,6 +354,9 @@ class DockerClonerGUI(QWidget):
             'btn_sections_toggle':"Expand or collapse all configuration sections (toggles state).",
             'btn_reset_defaults':"Reset all configuration fields to their initial defaults (does not clear recent URL history).",
             'console':"Log output, progress messages, structured event summaries, and diagnostics.",
+            'user_agent_in':"Optional custom User-Agent string sent with wget2 and prerender fetches (helps bypass simplistic bot blocks).",
+            'extra_wget_args_in':"Raw extra wget2 arguments (advanced). Use for retry tuning, header overrides, or debugging issues.",
+            'btn_diagnose':"Analyze last error lines and suggest troubleshooting actions (UA override, retries, concurrency tweaks).",
         }
         for name,text in tt.items():
             w=getattr(self,name,None)
@@ -550,6 +561,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         self.cookies_file.setText('')
         self.chk_import_browser_cookies.setChecked(False)
         self.plugins_dir.setText('')
+        if hasattr(self,'user_agent_in'): self.user_agent_in.setText('')
+        if hasattr(self,'extra_wget_args_in'): self.extra_wget_args_in.setText('')
         # Re-run interlock logic and dependency banner
         self._on_prerender_toggled(self.chk_prerender.isChecked())
         self._update_dependency_banner()
@@ -580,7 +593,9 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'disable_js': self.chk_disable_js.isChecked(), 'size_cap': self.size_cap.text().strip(), 'throttle': self.throttle.text().strip(),
             'threads': self.spin_threads.value() if hasattr(self,'spin_threads') else None,
             'auth_user': self.auth_user.text().strip(), 'auth_pass': self.auth_pass.text().strip(), 'cookies_file': self.cookies_file.text().strip(), 'import_browser_cookies': self.chk_import_browser_cookies.isChecked(),
-            'plugins_dir': self.plugins_dir.text().strip()
+            'plugins_dir': self.plugins_dir.text().strip(),
+            'user_agent': self.user_agent_in.text().strip() if hasattr(self,'user_agent_in') else '',
+            'extra_wget_args': self.extra_wget_args_in.text().strip() if hasattr(self,'extra_wget_args_in') else ''
         }
     def _apply_profile_dict(self, data: dict):
         try:
@@ -632,6 +647,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             self.cookies_file.setText(data.get('cookies_file',''))
             self.chk_import_browser_cookies.setChecked(bool(data.get('import_browser_cookies')))
             self.plugins_dir.setText(data.get('plugins_dir',''))
+            if hasattr(self,'user_agent_in'): self.user_agent_in.setText(data.get('user_agent',''))
+            if hasattr(self,'extra_wget_args_in'): self.extra_wget_args_in.setText(data.get('extra_wget_args',''))
             # Refresh wizard availability after loading profile
             try:
                 self.btn_wizard.setEnabled(bool(self.url_in.text().strip()))
@@ -919,7 +936,9 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             router_allow=[p.strip() for p in self.router_allow.text().split(',') if p.strip()] or None, router_deny=[p.strip() for p in self.router_deny.text().split(',') if p.strip()] or None, router_quiet=self.chk_router_quiet.isChecked(),
             no_manifest=False, checksums=self.chk_checksums.isChecked(), checksum_ext=self.checksum_ext.text().strip() or None, verify_after=self.chk_verify_after.isChecked(), verify_deep=self.chk_verify_deep.isChecked(),
             incremental=self.chk_incremental.isChecked(), diff_latest=self.chk_diff.isChecked(), plugins_dir=self.plugins_dir.text().strip() or None, json_logs=False, profile=False,
-            open_browser=self.chk_open_browser.isChecked(), run_built=self.chk_run_built.isChecked(), serve_folder=self.chk_serve.isChecked(), estimate_first=self.chk_estimate_first.isChecked()
+            open_browser=self.chk_open_browser.isChecked(), run_built=self.chk_run_built.isChecked(), serve_folder=self.chk_serve.isChecked(), estimate_first=self.chk_estimate_first.isChecked(),
+            user_agent=(self.user_agent_in.text().strip() or None) if hasattr(self,'user_agent_in') else None,
+            extra_wget_args=(self.extra_wget_args_in.text().strip() or None) if hasattr(self,'extra_wget_args_in') else None
         )
         setattr(cfg,'cleanup', self.chk_cleanup.isChecked())
         return cfg
@@ -1307,6 +1326,76 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         tot=0.0
         for ph,w in self._weighted.items(): tot+=w*(self._phase_pct.get(ph,0)/100.0)
         overall=int(round(tot*100)); self.prog.setValue(overall); self.status_lbl.setText(f"{phase}: {pct}% (overall {overall}%)")
+
+    # ------------------- Troubleshooting Diagnostics -------------------
+    def _run_diagnostics(self):  # lightweight heuristic suggestions based on last console lines
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            text=self.console.toPlainText().splitlines()[-80:]  # last 80 lines
+        except Exception:
+            QMessageBox.information(self,'Diagnostics','No console output to analyze yet.')
+            return
+        if not text:
+            QMessageBox.information(self,'Diagnostics','No console output to analyze yet.')
+            return
+        import re as _re
+        exit_code=None; http_codes=[]; hints=[]
+        ua_set=bool(self.user_agent_in.text().strip()) if hasattr(self,'user_agent_in') else False
+        extra_set=bool(self.extra_wget_args_in.text().strip()) if hasattr(self,'extra_wget_args_in') else False
+        # Parse lines
+        for line in text:
+            m=_re.search(r'exit code (\d+)', line)
+            if m:
+                try: exit_code=int(m.group(1))
+                except Exception: pass
+            # crude HTTP code detection (e.g., 'HTTP/1.1 403' or 'ERROR 404')
+            for hm in _re.finditer(r'\b(\d{3})\b', line):
+                code=int(hm.group(1))
+                if 100 <= code <= 599 and code not in http_codes:
+                    http_codes.append(code)
+        # Exit code mapping (mirror of core hints but GUI-focused)
+        if exit_code is not None:
+            if exit_code==8:
+                hints.append("""Exit 8: Server issued errors (4xx/5xx). Consider:
+ - Set a realistic User-Agent (many sites block default wget).
+ - Reduce threads (try 4-6) if rate limiting suspected.
+ - Add retries: e.g. --retry-on-http-error=429,500,503 --tries=3 --waitretry=2""")
+            elif exit_code==5:
+                hints.append('Exit 5: SSL/TLS issue. If certificate problems, you can test with --no-check-certificate (not recommended long-term).')
+            elif exit_code==6:
+                hints.append('Exit 6: Authentication problem. Verify auth_user/auth_pass or cookie file validity.')
+            elif exit_code==4:
+                hints.append('Exit 4: Network failure. Check connectivity, proxy, firewall; add retry/backoff args.')
+            elif exit_code==2:
+                hints.append('Exit 2: Parse/usage error. Re-check extra wget arguments for typos.')
+        # HTTP codes
+        for code in http_codes[:12]:  # limit
+            if code in (301,302,307,308):
+                continue
+            if code==403 and not ua_set:
+                hints.append('HTTP 403 detected: try setting a common browser User-Agent.')
+            if code==404:
+                hints.append('HTTP 404 responses: ensure starting URL is correct and not blocking assets by robots.')
+            if code in (429, 503):
+                hints.append(f'HTTP {code} suggests rate limiting; reduce threads and add retry/backoff arguments.')
+        if not ua_set:
+            hints.append('No custom User-Agent set. Some sites block default agents; consider specifying one.')
+        if not extra_set:
+            hints.append('You can supply extra retry / header args in Extra wget2 Args for stubborn failures.')
+        # Deduplicate preserve order
+        seen=set(); final=[h for h in hints if not (h in seen or seen.add(h))]
+        if not final:
+            final=['No specific issues detected in last output segment. Review full log for context.']
+        msg='\n\n'.join(final)
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self,'Diagnostics Suggestions', msg if len(msg)<3000 else msg[:3000]+'...')
+        except Exception:
+            self._on_log('[diagnostics]\n'+msg.replace('\n',' '))
+        # Also echo top suggestions to console
+        for h in final[:4]:
+            for line in h.splitlines():
+                self._on_log('[diag] '+line)
 
 def launch():
     app=QApplication(sys.argv)
