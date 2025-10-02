@@ -16,7 +16,7 @@ from PySide6.QtGui import QPixmap, QIcon
 
 from cw2dt_core import (
     validate_required_fields, is_wget2_available, docker_available,
-    port_in_use, CloneConfig, clone_site, CloneCallbacks
+    port_in_use, CloneConfig, clone_site, CloneCallbacks, image_exists_locally
 )
 
 class _GuiCallbacks(CloneCallbacks):
@@ -996,7 +996,14 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
     def _clone_finished(self, result):
         self._on_log('[gui] clone finished'); self._set_running(False); self._last_result=result
         if result and getattr(result,'success',False):
-            self.status_lbl.setText('Clone SUCCESS'); self._save_history(); self.btn_run_docker.setEnabled(True); self.btn_serve.setEnabled(True)
+            self.status_lbl.setText('Clone SUCCESS'); self._save_history();
+            # Only enable Run Docker if image was actually built
+            if getattr(result,'docker_built',False):
+                self.btn_run_docker.setEnabled(True)
+            else:
+                self.btn_run_docker.setEnabled(False)
+                self._on_log('[hint] Docker image not built (Build Docker image was unchecked or build failed). Enable the checkbox and re-run to build, or run a manual docker build in the output folder.')
+            self.btn_serve.setEnabled(True)
         else:
             self.status_lbl.setText('Clone FAILED')
         if result and getattr(result,'output_folder',None): self.console.append(f"Output: {result.output_folder}")
@@ -1054,6 +1061,12 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
     def _run_docker_image(self):
         if not self._last_result or not getattr(self._last_result,'success',False): return
         name=self.name_in.text().strip() or 'site'
+        # Verify image exists locally (user may have forgotten to check Build Docker image)
+        if not getattr(self._last_result,'docker_built',False):
+            # Double-check via docker inspect in case it existed from earlier run
+            if not image_exists_locally(name):
+                self._on_log(f"[gui] cannot run – image '{name}' not built. Check 'Build Docker image' then re-run, or manually build with: docker build -t {name} <output_folder>")
+                return
         try:
             import subprocess
             cmd=['docker','run','-d','-p',f"{self.host_port.value()}:{self.cont_port.value()}",name]
