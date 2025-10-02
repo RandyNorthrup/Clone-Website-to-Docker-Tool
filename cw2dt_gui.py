@@ -177,8 +177,20 @@ class DockerClonerGUI(QWidget):
         for w in (self.chk_checksums,self.chk_verify_after,self.chk_verify_deep,self.checksum_ext): integ.addWidget(w)
         config_v.addWidget(integ)
         # Misc
-        misc=_CollapsibleBox('Misc & Performance'); self._sections.append(misc); self.chk_disable_js=QCheckBox('Disable JS (strip <script>)'); self.size_cap=QLineEdit(); self.size_cap.setPlaceholderText('Size cap e.g. 500M'); self.throttle=QLineEdit(); self.throttle.setPlaceholderText('Throttle e.g. 2M'); self.auth_user=QLineEdit(); self.auth_user.setPlaceholderText('Auth user'); self.auth_pass=QLineEdit(); self.auth_pass.setPlaceholderText('Auth pass'); self.cookies_file=QLineEdit(); self.cookies_file.setPlaceholderText('cookies.txt'); self.chk_import_browser_cookies=QCheckBox('Import Browser Cookies'); cr=QHBoxLayout(); cr.addWidget(self.cookies_file); cbbtn=QPushButton('...'); cr.addWidget(cbbtn); cbbtn.clicked.connect(lambda: self._pick_file(self.cookies_file)); self.plugins_dir=QLineEdit(); self.plugins_dir.setPlaceholderText('Plugins directory'); pr=QHBoxLayout(); pr.addWidget(self.plugins_dir); pbtn=QPushButton('...'); pr.addWidget(pbtn); pbtn.clicked.connect(lambda: self._pick_dir(self.plugins_dir))
-        for w in (self.chk_disable_js,self.size_cap,self.throttle,self.auth_user,self.auth_pass,self.chk_import_browser_cookies): misc.addWidget(w)
+        misc=_CollapsibleBox('Misc & Performance'); self._sections.append(misc)
+        self.chk_disable_js=QCheckBox('Disable JS (strip <script>)')
+        self.size_cap=QLineEdit(); self.size_cap.setPlaceholderText('Size cap e.g. 500M')
+        self.throttle=QLineEdit(); self.throttle.setPlaceholderText('Throttle e.g. 2M')
+        self.spin_threads=QSpinBox(); self.spin_threads.setRange(1,128); self.spin_threads.setValue(12); self.spin_threads.setToolTip('Max concurrent download threads (auto-adapts to wget2 flag).')
+        self.auth_user=QLineEdit(); self.auth_user.setPlaceholderText('Auth user')
+        self.auth_pass=QLineEdit(); self.auth_pass.setPlaceholderText('Auth pass')
+        self.cookies_file=QLineEdit(); self.cookies_file.setPlaceholderText('cookies.txt')
+        self.chk_import_browser_cookies=QCheckBox('Import Browser Cookies')
+        cr=QHBoxLayout(); cr.addWidget(self.cookies_file); cbbtn=QPushButton('...'); cr.addWidget(cbbtn); cbbtn.clicked.connect(lambda: self._pick_file(self.cookies_file))
+        self.plugins_dir=QLineEdit(); self.plugins_dir.setPlaceholderText('Plugins directory')
+        pr=QHBoxLayout(); pr.addWidget(self.plugins_dir); pbtn=QPushButton('...'); pr.addWidget(pbtn); pbtn.clicked.connect(lambda: self._pick_dir(self.plugins_dir))
+        for w in (self.chk_disable_js, QLabel('Download Threads:'), self.spin_threads, self.size_cap, self.throttle, self.auth_user, self.auth_pass, self.chk_import_browser_cookies):
+            misc.addWidget(w)
         misc.addLayout(cr); misc.addLayout(pr); config_v.addWidget(misc)
         config_v.addStretch(1)
         # Footer reset defaults button spanning width
@@ -315,6 +327,7 @@ class DockerClonerGUI(QWidget):
             'chk_disable_js':"Strip <script> tags from output for hardened static snapshot (may break interactivity).",
             'size_cap':"Total download size hard cap (e.g. 500M, 2G). Empty = unlimited.",
             'throttle':"Limit download bandwidth (e.g. 2M for ~2 megabytes/second).",
+            'spin_threads':"Maximum concurrent network download threads requested. Tool will use --max-threads or fallback if unsupported.",
             'auth_user':"HTTP Basic Auth username (if site requires).",
             'auth_pass':"HTTP Basic Auth password (if site requires).",
             'cookies_file':"Path to Netscape format cookies.txt to inject during clone/prerender.",
@@ -531,6 +544,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         self.chk_disable_js.setChecked(False)
         self.size_cap.setText('')
         self.throttle.setText('')
+        if hasattr(self,'spin_threads'): self.spin_threads.setValue(12)
         self.auth_user.setText('')
         self.auth_pass.setText('')
         self.cookies_file.setText('')
@@ -564,6 +578,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'router_allow': self.router_allow.text().strip(), 'router_deny': self.router_deny.text().strip(),
             'checksums': self.chk_checksums.isChecked(), 'verify_after': self.chk_verify_after.isChecked(), 'verify_deep': self.chk_verify_deep.isChecked(), 'checksum_ext': self.checksum_ext.text().strip(),
             'disable_js': self.chk_disable_js.isChecked(), 'size_cap': self.size_cap.text().strip(), 'throttle': self.throttle.text().strip(),
+            'threads': self.spin_threads.value() if hasattr(self,'spin_threads') else None,
             'auth_user': self.auth_user.text().strip(), 'auth_pass': self.auth_pass.text().strip(), 'cookies_file': self.cookies_file.text().strip(), 'import_browser_cookies': self.chk_import_browser_cookies.isChecked(),
             'plugins_dir': self.plugins_dir.text().strip()
         }
@@ -609,6 +624,9 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             self.chk_disable_js.setChecked(bool(data.get('disable_js')))
             self.size_cap.setText(data.get('size_cap',''))
             self.throttle.setText(data.get('throttle',''))
+            if 'threads' in data and hasattr(self,'spin_threads'):
+                try: self.spin_threads.setValue(int(data.get('threads') or 12))
+                except Exception: pass
             self.auth_user.setText(data.get('auth_user',''))
             self.auth_pass.setText(data.get('auth_pass',''))
             self.cookies_file.setText(data.get('cookies_file',''))
@@ -889,6 +907,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             url=self.url_in.text().strip(), dest=self.dest_in.text().strip(), docker_name=self.name_in.text().strip() or 'site',
             build=self.chk_build.isChecked(), bind_ip=self.ip_in.text().strip() or '127.0.0.1', host_port=self.host_port.value(), container_port=self.cont_port.value(),
             size_cap=self.size_cap.text().strip() or None, throttle=self.throttle.text().strip() or None,
+            jobs=(self.spin_threads.value() if hasattr(self,'spin_threads') else 0),
             auth_user=self.auth_user.text().strip() or None, auth_pass=self.auth_pass.text().strip() or None,
             cookies_file=self.cookies_file.text().strip() or None, import_browser_cookies=self.chk_import_browser_cookies.isChecked(), disable_js=self.chk_disable_js.isChecked(),
             prerender=self.chk_prerender.isChecked(), prerender_max_pages=self.spin_prer_pages.value(), capture_api=self.chk_capture_api.isChecked(), hook_script=self.hook_in.text().strip() or None, prerender_scroll=self.spin_prer_scroll.value(),
