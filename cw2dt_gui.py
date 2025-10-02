@@ -181,6 +181,14 @@ class DockerClonerGUI(QWidget):
         for w in (self.chk_disable_js,self.size_cap,self.throttle,self.auth_user,self.auth_pass,self.chk_import_browser_cookies): misc.addWidget(w)
         misc.addLayout(cr); misc.addLayout(pr); config_v.addWidget(misc)
         config_v.addStretch(1)
+        # Footer reset defaults button spanning width
+        from PySide6.QtWidgets import QFrame
+        sep_footer=QFrame(); sep_footer.setFrameShape(QFrame.Shape.HLine); config_v.addWidget(sep_footer)
+        self.btn_reset_defaults=QPushButton('Reset Defaults')
+        self.btn_reset_defaults.setToolTip('Reset all configuration fields to their initial defaults (asks for confirmation).')
+        self.btn_reset_defaults.clicked.connect(self._reset_defaults)
+        self.btn_reset_defaults.setProperty('kind','secondary')
+        config_v.addWidget(self.btn_reset_defaults)
         # Right panel
         right=QWidget(); rv=QVBoxLayout(right); rv.setContentsMargins(4,4,4,4); rv.setSpacing(6)
         # Button rows (compact organization):
@@ -323,6 +331,7 @@ class DockerClonerGUI(QWidget):
             'btn_save_cfg':"Save current settings as a reusable profile (stored in ~/.cw2dt_profiles).",
             'btn_load_cfg':"Load a previously saved profile and apply its settings.",
             'btn_sections_toggle':"Expand or collapse all configuration sections (toggles state).",
+            'btn_reset_defaults':"Reset all configuration fields to their initial defaults (does not clear recent URL history).",
             'console':"Log output, progress messages, structured event summaries, and diagnostics.",
         }
         for name,text in tt.items():
@@ -478,6 +487,61 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             # Auto-enable prerender since captures depend on it
             self._on_log('[gui] enabling prerender (required for capture)')
             self.chk_prerender.setChecked(True)
+
+    # -------- Reset Defaults --------
+    def _reset_defaults(self):
+        from PySide6.QtWidgets import QMessageBox
+        resp=QMessageBox.question(self,'Reset Defaults','Reset all configuration fields to default values?')
+        if resp!=QMessageBox.StandardButton.Yes:
+            return
+        # Basic fields
+        self.url_in.setText('')
+        self.dest_in.setText('')
+        self.name_in.setText('site')
+        self.ip_in.setText('127.0.0.1')
+        self.host_port.setValue(8080)
+        self.cont_port.setValue(80)
+        # Clone options
+        for cb in (self.chk_build,self.chk_run_built,self.chk_serve,self.chk_open_browser,self.chk_incremental,self.chk_diff,self.chk_estimate_first,self.chk_cleanup):
+            cb.setChecked(False)
+        # Dynamic / prerender
+        self.chk_prerender.setChecked(False)
+        self.spin_prer_pages.setValue(40)
+        self.spin_prer_scroll.setValue(0)
+        self.spin_dom_stable.setValue(0)
+        self.spin_dom_stable_timeout.setValue(4000)
+        for cb in (self.chk_capture_api,self.chk_capture_api_binary,self.chk_capture_graphql,self.chk_capture_storage):
+            cb.setChecked(False)
+        self.api_types_in.setText('')
+        self.hook_in.setText('')
+        # Router
+        self.chk_router.setChecked(False)
+        self.chk_route_hash.setChecked(False)
+        self.chk_router_quiet.setChecked(False)
+        self.spin_router_max.setValue(200)
+        self.spin_router_settle.setValue(350)
+        self.router_wait_sel.setText('')
+        self.router_allow.setText('')
+        self.router_deny.setText('')
+        # Integrity
+        for cb in (self.chk_checksums,self.chk_verify_after,self.chk_verify_deep):
+            cb.setChecked(False)
+        self.checksum_ext.setText('')
+        # Misc / Perf
+        self.chk_disable_js.setChecked(False)
+        self.size_cap.setText('')
+        self.throttle.setText('')
+        self.auth_user.setText('')
+        self.auth_pass.setText('')
+        self.cookies_file.setText('')
+        self.chk_import_browser_cookies.setChecked(False)
+        self.plugins_dir.setText('')
+        # Re-run interlock logic and dependency banner
+        self._on_prerender_toggled(self.chk_prerender.isChecked())
+        self._update_dependency_banner()
+        # Disable wizard until URL entered again
+        self.btn_wizard.setEnabled(False)
+        self._on_log('[gui] settings reset to defaults')
 
     # ------------------- Profiles (Save / Load) -------------------
     def _profiles_dir(self):
