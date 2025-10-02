@@ -1308,7 +1308,13 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         except Exception as e:
             log(f"[cookies] unexpected error: {e}")
     if cfg.incremental: wget_cmd.append('-N')
-    if cfg.jobs and cfg.jobs > 1: wget_cmd += ['-j', str(int(cfg.jobs))]
+    # Parallel jobs: use long form '--jobs=N' (previous short '-j' caused 'Unknown option')
+    if cfg.jobs and cfg.jobs > 1:
+        try:
+            wget_cmd.append(f"--jobs={int(cfg.jobs)}")
+        except Exception:
+            # Fallback: omit jobs flag if something unexpected happens
+            pass
     if cfg.size_cap:
         b = parse_size_to_bytes(cfg.size_cap)
         if b: wget_cmd += ['--quota', human_quota_suffix(b)]
