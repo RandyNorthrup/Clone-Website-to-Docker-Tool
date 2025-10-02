@@ -4,6 +4,20 @@ All notable changes to this project will be documented here. The format loosely 
 
 ## [1.1.3] - 2025-10-01
 
+## [1.1.4] - 2025-10-01
+
+### Added (Prerender Scroll)
+
+- New `--prerender-scroll N` flag and GUI field (Scroll Passes) to perform N incremental scroll passes per prerendered page (each pass scrolls to `document.body.scrollHeight` then waits ~350ms) to trigger lazy/infinite content loading.
+- Manifest field `prerender_scroll_passes` records configured scroll passes; prerender stats now include `scroll_passes`.
+- Reproduction command includes `--prerender-scroll` when non-zero.
+
+### Notes
+
+- Use small values (1-3) first; high values can significantly increase prerender time on long feeds.
+- Combine with hook script for more complex pagination or button-triggered load behaviors.
+
+
 ### Added (Storage Capture)
 
 - Added `--capture-storage` option to snapshot `localStorage` and `sessionStorage` for each prerendered page (writes JSON files under `_storage/` mirroring HTML path with `.storage.json` suffix).

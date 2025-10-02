@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.
@@ -400,6 +400,7 @@ def parse_rate_to_bps(text: str) -> int | None: return parse_size_to_bytes(text)
 # --- prerender (optional) ---
 def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages: int = 40,
                    capture_api: bool = False, hook_script: str | None = None,
+                   scroll_passes: int = 0,  # new: number of incremental scrolls per page to trigger lazy load
                    capture_storage: bool = False,
                    capture_api_types: list[str] | None = None,
                    capture_api_binary: bool = False,
@@ -522,12 +523,12 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             context.on('response', on_response)
         pages_processed=0
     while to_visit and pages_processed < max_pages:
-            url = to_visit.pop(0)
-            if url in visited: continue
-            visited.add(url)
-            try:
-                page = context.new_page(); page.goto(url, wait_until='networkidle')
-                if router_intercept:
+        url = to_visit.pop(0)
+        if url in visited: continue
+        visited.add(url)
+        try:
+            page = context.new_page(); page.goto(url, wait_until='networkidle')
+            if router_intercept:
                     try:
                         def _enqueue_route(source, route_path):  # type: ignore
                             try:
@@ -563,81 +564,90 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                         """
                         page.add_init_script(interception_js)
                     except Exception: pass
-                if hook_fn:
-                    try: hook_fn(page, url, context)
-                    except Exception as e: emit(f"Hook error on {url}: {e}")
-                if router_intercept and router_settle_ms>0:
-                    try: page.wait_for_timeout(router_settle_ms)
-                    except Exception: pass
-                if router_intercept and router_wait_selector:
-                    try: page.wait_for_selector(router_wait_selector, timeout=router_settle_ms*2)
-                    except Exception: pass
-                html = page.content();
-                if rewrite_urls and origin:
-                    html = html.replace(origin, '')
-                rel='index.html'
-                try:
-                    up=urlparse(url); rel=up.path
-                    if rel.endswith('/') or rel=='': rel = (rel.rstrip('/') + '/index.html') if rel else 'index.html'
-                    if not rel.endswith('.html') and not rel.split('/')[-1].count('.'):
-                        rel = rel.rstrip('/') + '.html'
+            if hook_fn:
+                try: hook_fn(page, url, context)
+                except Exception as e: emit(f"Hook error on {url}: {e}")
+            if router_intercept and router_settle_ms>0:
+                try: page.wait_for_timeout(router_settle_ms)
                 except Exception: pass
-                if capture_storage and storage_dir:
-                    try:
-                        ls_keys = page.evaluate("Object.keys(localStorage)") or []
-                        ss_keys = page.evaluate("Object.keys(sessionStorage)") or []
-                        ls_data = {}
-                        ss_data = {}
-                        for k in ls_keys:
-                            try:
-                                safe_k = k.replace('\\', r'\\\\').replace("'", r"\\'")
-                                ls_data[k] = page.evaluate(f"localStorage.getItem('{safe_k}')")
-                            except Exception:
-                                pass
-                        for k in ss_keys:
-                            try:
-                                safe_k = k.replace('\\', r'\\\\').replace("'", r"\\'")
-                                ss_data[k] = page.evaluate(f"sessionStorage.getItem('{safe_k}')")
-                            except Exception:
-                                pass
-                        if ls_data or ss_data:
-                            storage_rel = rel[:-5] + '.storage.json' if rel.endswith('.html') else rel + '.storage.json'
-                            storage_path = os.path.join(storage_dir, storage_rel.lstrip('/'))
-                            os.makedirs(os.path.dirname(storage_path), exist_ok=True)
-                            with open(storage_path,'w',encoding='utf-8') as sf:
-                                json.dump({'url': url, 'localStorage': ls_data, 'sessionStorage': ss_data}, sf, indent=2)
-                            storage_snapshots += 1
-                    except Exception:
-                        pass
-                out_path = os.path.join(site_root, rel.lstrip('/'))
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                with open(out_path,'w',encoding='utf-8') as f: f.write(html)
-                pages_processed += 1
-                if progress_percent_cb:
-                    try: progress_percent_cb(int((pages_processed/max_pages)*100))
-                    except Exception: pass
-                emit(f"Prerendered {url} -> {rel}")
-                for a in page.query_selector_all('a[href]'):
-                    try:
-                        href = a.get_attribute('href')
-                        if not href or href.startswith(('mailto:','javascript:')): continue
-                        new_url=urljoin(url, href)
-                        if origin and not new_url.startswith(origin): continue
-                        if new_url not in visited and new_url not in to_visit: to_visit.append(new_url)
-                    except Exception: continue
-                page.close()
-            except Exception as e:
-                emit(f"Failed prerender {url}: {e}")
-        browser.close()
-        if capture_api: emit(f"Captured {len(captured)} API responses.")
-        if capture_storage: emit(f"Captured {storage_snapshots} storage snapshots.")
-        emit(f"Prerender finished. Pages: {pages_processed}, Remaining queue: {len(to_visit)}")
-        return {
-            'pages_processed': pages_processed,
-            'routes_discovered': len(router_seen) if router_intercept else 0,
-            'api_captured': len(captured) if capture_api else 0,
-            'storage_captured': storage_snapshots if capture_storage else 0
-        }
+            if router_intercept and router_wait_selector:
+                try: page.wait_for_selector(router_wait_selector, timeout=router_settle_ms*2)
+                except Exception: pass
+                # Optional incremental scroll passes to surface lazy content (images, infinite lists)
+            if scroll_passes and scroll_passes > 0:
+                try:
+                    for i in range(int(scroll_passes)):
+                        page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                        page.wait_for_timeout(350)
+                except Exception:
+                    pass
+            html = page.content();
+            if rewrite_urls and origin:
+                html = html.replace(origin, '')
+            rel='index.html'
+            try:
+                up=urlparse(url); rel=up.path
+                if rel.endswith('/') or rel=='': rel = (rel.rstrip('/') + '/index.html') if rel else 'index.html'
+                if not rel.endswith('.html') and not rel.split('/')[-1].count('.'):
+                    rel = rel.rstrip('/') + '.html'
+            except Exception: pass
+            if capture_storage and storage_dir:
+                try:
+                    ls_keys = page.evaluate("Object.keys(localStorage)") or []
+                    ss_keys = page.evaluate("Object.keys(sessionStorage)") or []
+                    ls_data = {}
+                    ss_data = {}
+                    for k in ls_keys:
+                        try:
+                            safe_k = k.replace('\\', r'\\\\').replace("'", r"\\'")
+                            ls_data[k] = page.evaluate(f"localStorage.getItem('{safe_k}')")
+                        except Exception:
+                            pass
+                    for k in ss_keys:
+                        try:
+                            safe_k = k.replace('\\', r'\\\\').replace("'", r"\\'")
+                            ss_data[k] = page.evaluate(f"sessionStorage.getItem('{safe_k}')")
+                        except Exception:
+                            pass
+                    if ls_data or ss_data:
+                        storage_rel = rel[:-5] + '.storage.json' if rel.endswith('.html') else rel + '.storage.json'
+                        storage_path = os.path.join(storage_dir, storage_rel.lstrip('/'))
+                        os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+                        with open(storage_path,'w',encoding='utf-8') as sf:
+                            json.dump({'url': url, 'localStorage': ls_data, 'sessionStorage': ss_data}, sf, indent=2)
+                        storage_snapshots += 1
+                except Exception:
+                    pass
+            out_path = os.path.join(site_root, rel.lstrip('/'))
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path,'w',encoding='utf-8') as f: f.write(html)
+            pages_processed += 1
+            if progress_percent_cb:
+                try: progress_percent_cb(int((pages_processed/max_pages)*100))
+                except Exception: pass
+            emit(f"Prerendered {url} -> {rel}")
+            for a in page.query_selector_all('a[href]'):
+                try:
+                    href = a.get_attribute('href')
+                    if not href or href.startswith(('mailto:','javascript:')): continue
+                    new_url=urljoin(url, href)
+                    if origin and not new_url.startswith(origin): continue
+                    if new_url not in visited and new_url not in to_visit: to_visit.append(new_url)
+                except Exception: continue
+            page.close()
+        except Exception as e:
+            emit(f"Failed prerender {url}: {e}")
+    browser.close()
+    if capture_api: emit(f"Captured {len(captured)} API responses.")
+    if capture_storage: emit(f"Captured {storage_snapshots} storage snapshots.")
+    emit(f"Prerender finished. Pages: {pages_processed}, Remaining queue: {len(to_visit)}")
+    return {
+        'pages_processed': pages_processed,
+        'routes_discovered': len(router_seen) if router_intercept else 0,
+        'api_captured': len(captured) if capture_api else 0,
+        'storage_captured': storage_snapshots if capture_storage else 0,
+        'scroll_passes': int(scroll_passes) if scroll_passes else 0
+    }
     if progress_percent_cb:
         try: progress_percent_cb(100)
         except Exception: pass
@@ -664,6 +674,7 @@ class CloneConfig:
     # prerender
     prerender: bool = False
     prerender_max_pages: int = DEFAULT_PRERENDER_MAX_PAGES
+    prerender_scroll: int = 0  # number of scroll passes per prerendered page (0 disabled)
     capture_api: bool = False
     capture_api_types: Optional[List[str]] = None  # list of content-type prefixes (defaults to application/json)
     capture_api_binary: bool = False  # capture selected binary types (pdf, images, etc.)
@@ -848,6 +859,8 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
         cmd.append("--prerender")
         if cfg.prerender_max_pages != 40:
             cmd.append(f"--prerender-max-pages={cfg.prerender_max_pages}")
+        if getattr(cfg,'prerender_scroll',0):
+            cmd.append(f"--prerender-scroll={cfg.prerender_scroll}")
         if cfg.capture_api:
             cmd.append("--capture-api")
             if cfg.capture_api_types:
@@ -1177,6 +1190,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 output_folder=output_folder,
                 max_pages=cfg.prerender_max_pages,
                 capture_api=cfg.capture_api,
+                scroll_passes=getattr(cfg,'prerender_scroll',0),
                 capture_storage=cfg.capture_storage,
                 capture_api_types=cfg.capture_api_types,
                 capture_api_binary=cfg.capture_api_binary,
@@ -1442,6 +1456,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 'schema_version': SCHEMA_VERSION,
                 'prerender':cfg.prerender,
                 'prerender_max_pages': cfg.prerender_max_pages if cfg.prerender else None,
+                'prerender_scroll_passes': cfg.prerender_scroll if (cfg.prerender and cfg.prerender_scroll) else 0,
                 'capture_api':cfg.capture_api if cfg.prerender else False,  # primary key (new schema)
                 'api_capture':cfg.capture_api if cfg.prerender else False,   # legacy alias parity
                 'capture_api_types': cfg.capture_api_types if (cfg.prerender and cfg.capture_api) else None,
@@ -1822,6 +1837,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--open-browser', action='store_true', help='Open the URL after starting container')
     parser.add_argument('--prerender', action='store_true', help='After clone, prerender dynamic pages with Playwright (optional)')
     parser.add_argument('--prerender-max-pages', type=int, default=40)
+    parser.add_argument('--prerender-scroll', type=int, default=0, help='Number of incremental scroll passes per prerendered page to trigger lazy loading (0=disabled)')
     parser.add_argument('--capture-api', action='store_true', help='Capture API responses during prerender (JSON by default)')
     parser.add_argument('--capture-api-types', default=None, help='Slash- or comma-separated list of content-type prefixes to capture (e.g. application/json,text/csv)')
     parser.add_argument('--capture-api-binary', action='store_true', help='Also capture common binary types (pdf, images, octet-stream)')
@@ -1886,7 +1902,7 @@ def headless_main(argv: list[str]) -> int:
         url=args.url, dest=args.dest, docker_name=args.docker_name, build=args.build, jobs=args.jobs,
         bind_ip=args.bind_ip, host_port=args.host_port, container_port=args.container_port, size_cap=args.size_cap,
     throttle=args.throttle, auth_user=args.auth_user, auth_pass=args.auth_pass, cookies_file=args.cookies_file, import_browser_cookies=args.import_browser_cookies, disable_js=args.disable_js,
-        prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, capture_api=args.capture_api,
+        prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, prerender_scroll=args.prerender_scroll, capture_api=args.capture_api,
         capture_api_types=_cap_types, capture_api_binary=args.capture_api_binary,
         capture_storage=args.capture_storage,
         hook_script=args.hook_script, rewrite_urls=(not args.no_url_rewrite), router_intercept=args.router_intercept,

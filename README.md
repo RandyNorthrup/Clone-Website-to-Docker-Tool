@@ -217,6 +217,7 @@ Prerender & Dynamic:
 
 - `--prerender` Enable Playwright dynamic DOM capture
 - `--prerender-max-pages N` Cap prerender traversal (default 40)
+- `--prerender-scroll N` Perform N incremental scroll passes per prerendered page (each pass scrolls to bottom then waits ~350ms) to surface lazy-loaded content (0 disables)
 - `--capture-api` Persist application/json responses into `_api/`
 - `--capture-api-types TYPES` Capture additional content-types (comma or slash separated). Example: `--capture-api-types application/json,text/csv,application/xml`.
 - `--capture-api-binary` Include common binary API responses (pdf, images, audio, video, octet-stream). Saved with inferred or fallback extensions under `_api/`.
@@ -287,12 +288,12 @@ When `--prerender` (or the GUI checkbox) is enabled:
 2. Playwright launches headless Chromium and begins exploring from the start URL.
 3. Each visited page's fully rendered DOM (`page.content()`) overwrites / creates the corresponding HTML file.
 4. Links (`<a href>`) inside the same origin are queued until the `--prerender-max-pages` limit is hit.
-5. If `--capture-api` is set, matching API/XHR/fetch responses are stored under `_api/` mirroring the request path. By default only `application/json` is captured. Extend or narrow capture with `--capture-api-types` (comma or slash separated prefixes, e.g. `application/json,text/plain,text/csv`). Add `--capture-api-binary` to also persist common binary types (`application/pdf`, `application/octet-stream`, `image/*`, `audio/*`, `video/*`). Text responses are UTF‑8 written with a mapped extension; binary responses are written verbatim (fallback `.bin`).
-6. If `--capture-storage` is enabled, a snapshot of `localStorage` and `sessionStorage` for the page is written under `_storage/` with the same relative path as the HTML file but ending in `.storage.json` (e.g. `about/index.storage.json`).
-7. If a `--hook-script` is provided and exports `on_page(page, url, context)`, it is invoked before HTML extraction (ideal for login flows, expanding lazy content, or scraping single-page app states).
-8. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
-9. The prerender queue stops when either the page limit is reached or there are no more same‑origin links/routes to process.
-8. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
+5. If `--prerender-scroll` is non-zero, the page is scrolled to the bottom that many times (with short waits) before HTML snapshot to trigger infinite/lazy loading.
+6. If `--capture-api` is set, matching API/XHR/fetch responses are stored under `_api/` mirroring the request path. By default only `application/json` is captured. Extend or narrow capture with `--capture-api-types` (comma or slash separated prefixes, e.g. `application/json,text/plain,text/csv`). Add `--capture-api-binary` to also persist common binary types (`application/pdf`, `application/octet-stream`, `image/*`, `audio/*`, `video/*`). Text responses are UTF‑8 written with a mapped extension; binary responses are written verbatim (fallback `.bin`).
+7. If `--capture-storage` is enabled, a snapshot of `localStorage` and `sessionStorage` for the page is written under `_storage/` with the same relative path as the HTML file but ending in `.storage.json` (e.g. `about/index.storage.json`).
+8. If a `--hook-script` is provided and exports `on_page(page, url, context)`, it is invoked before HTML extraction (ideal for login flows, expanding lazy content, or scraping single-page app states).
+9. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
+10. The prerender queue stops when either the page limit is reached or there are no more same‑origin links/routes to process.
 
 ### Live Metrics
 
