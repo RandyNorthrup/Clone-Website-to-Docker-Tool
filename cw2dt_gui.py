@@ -134,7 +134,28 @@ class DockerClonerGUI(QWidget):
         for w in (self.chk_build,self.chk_run_built,self.chk_serve,self.chk_open_browser,self.chk_incremental,self.chk_diff,self.chk_estimate_first,self.chk_cleanup): clone.addWidget(w)
         config_v.addWidget(clone)
         # Dynamic
-        dyn=_CollapsibleBox('Dynamic / Prerender'); self._sections.append(dyn); self.chk_prerender=QCheckBox('Prerender (Playwright)'); self.spin_prer_pages=QSpinBox(); self.spin_prer_pages.setRange(1,2000); self.spin_prer_pages.setValue(40); self.spin_prer_scroll=QSpinBox(); self.spin_prer_scroll.setRange(0,50); self.spin_prer_scroll.setValue(0); self.spin_prer_scroll.setToolTip('Incremental scroll passes per page (0 disables). Each pass scrolls to bottom then waits ~350ms.'); self.chk_capture_api=QCheckBox('Capture API JSON'); self.hook_in=QLineEdit(); hr=QHBoxLayout(); hr.addWidget(QLabel('Hook Script:')); hr.addWidget(self.hook_in); hb=QPushButton('...'); hr.addWidget(hb); hb.clicked.connect(lambda: self._pick_file(self.hook_in)); dyn.addWidget(self.chk_prerender); dyn.addWidget(QLabel('Max Pages:')); dyn.addWidget(self.spin_prer_pages); dyn.addWidget(QLabel('Scroll Passes:')); dyn.addWidget(self.spin_prer_scroll); dyn.addWidget(self.chk_capture_api); dyn.addLayout(hr); config_v.addWidget(dyn)
+        # Dynamic / Prerender section
+        dyn=_CollapsibleBox('Dynamic / Prerender')
+        self._sections.append(dyn)
+        self.chk_prerender=QCheckBox('Prerender (Playwright)')
+        self.spin_prer_pages=QSpinBox(); self.spin_prer_pages.setRange(1,2000); self.spin_prer_pages.setValue(40)
+        self.spin_prer_scroll=QSpinBox(); self.spin_prer_scroll.setRange(0,50); self.spin_prer_scroll.setValue(0)
+        self.spin_prer_scroll.setToolTip('Incremental scroll passes per page (0 disables). Each pass scrolls to bottom then waits ~350ms.')
+        self.spin_dom_stable=QSpinBox(); self.spin_dom_stable.setRange(0,10000); self.spin_dom_stable.setValue(0)
+        self.spin_dom_stable.setToolTip('Require this many ms of no DOM mutations before snapshot (0 disables).')
+        self.spin_dom_stable_timeout=QSpinBox(); self.spin_dom_stable_timeout.setRange(500,30000); self.spin_dom_stable_timeout.setValue(4000)
+        self.spin_dom_stable_timeout.setToolTip('Maximum additional wait attempting DOM stability per page.')
+        self.chk_capture_api=QCheckBox('Capture API JSON')
+        self.hook_in=QLineEdit()
+        hr=QHBoxLayout(); hr.addWidget(QLabel('Hook Script:')); hr.addWidget(self.hook_in); hb=QPushButton('...'); hr.addWidget(hb); hb.clicked.connect(lambda: self._pick_file(self.hook_in))
+        dyn.addWidget(self.chk_prerender)
+        dyn.addWidget(QLabel('Max Pages:')); dyn.addWidget(self.spin_prer_pages)
+        dyn.addWidget(QLabel('Scroll Passes:')); dyn.addWidget(self.spin_prer_scroll)
+        dyn.addWidget(QLabel('Dom Stable (ms):')); dyn.addWidget(self.spin_dom_stable)
+        dyn.addWidget(QLabel('Stable Timeout (ms):')); dyn.addWidget(self.spin_dom_stable_timeout)
+        dyn.addWidget(self.chk_capture_api)
+        dyn.addLayout(hr)
+        config_v.addWidget(dyn)
         # Router
         router=_CollapsibleBox('Router Interception'); self._sections.append(router); self.chk_router=QCheckBox('Enable Router Intercept'); self.chk_route_hash=QCheckBox('Include hash fragment (#)'); self.chk_router_quiet=QCheckBox('Quiet route logs'); self.spin_router_max=QSpinBox(); self.spin_router_max.setRange(1,10000); self.spin_router_max.setValue(200); self.spin_router_settle=QSpinBox(); self.spin_router_settle.setRange(0,10000); self.spin_router_settle.setValue(350); self.router_wait_sel=QLineEdit(); self.router_allow=QLineEdit(); self.router_deny=QLineEdit();
         for w in (self.chk_router,self.chk_route_hash,self.chk_router_quiet): router.addWidget(w)
@@ -417,6 +438,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'estimate_first': self.chk_estimate_first.isChecked(), 'cleanup': self.chk_cleanup.isChecked(),
             'prerender': self.chk_prerender.isChecked(), 'prerender_max_pages': self.spin_prer_pages.value(), 'capture_api': self.chk_capture_api.isChecked(), 'hook_script': self.hook_in.text().strip(),
             'prerender_scroll': self.spin_prer_scroll.value(),
+            'dom_stable_ms': self.spin_dom_stable.value(), 'dom_stable_timeout_ms': self.spin_dom_stable_timeout.value(),
             'router_intercept': self.chk_router.isChecked(), 'router_include_hash': self.chk_route_hash.isChecked(), 'router_quiet': self.chk_router_quiet.isChecked(),
             'router_max_routes': self.spin_router_max.value(), 'router_settle_ms': self.spin_router_settle.value(), 'router_wait_selector': self.router_wait_sel.text().strip(),
             'router_allow': self.router_allow.text().strip(), 'router_deny': self.router_deny.text().strip(),
@@ -444,6 +466,10 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             self.chk_prerender.setChecked(bool(data.get('prerender')))
             self.spin_prer_pages.setValue(int(data.get('prerender_max_pages',40)))
             try: self.spin_prer_scroll.setValue(int(data.get('prerender_scroll',0)))
+            except Exception: pass
+            try: self.spin_dom_stable.setValue(int(data.get('dom_stable_ms',0)))
+            except Exception: pass
+            try: self.spin_dom_stable_timeout.setValue(int(data.get('dom_stable_timeout_ms',4000)))
             except Exception: pass
             self.chk_capture_api.setChecked(bool(data.get('capture_api')))
             self.hook_in.setText(data.get('hook_script',''))
@@ -670,6 +696,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             auth_user=self.auth_user.text().strip() or None, auth_pass=self.auth_pass.text().strip() or None,
             cookies_file=self.cookies_file.text().strip() or None, import_browser_cookies=self.chk_import_browser_cookies.isChecked(), disable_js=self.chk_disable_js.isChecked(),
             prerender=self.chk_prerender.isChecked(), prerender_max_pages=self.spin_prer_pages.value(), capture_api=self.chk_capture_api.isChecked(), hook_script=self.hook_in.text().strip() or None, prerender_scroll=self.spin_prer_scroll.value(),
+            dom_stable_ms=self.spin_dom_stable.value(), dom_stable_timeout_ms=self.spin_dom_stable_timeout.value(),
             rewrite_urls=True, router_intercept=self.chk_router.isChecked(), router_include_hash=self.chk_route_hash.isChecked(), router_max_routes=self.spin_router_max.value(), router_settle_ms=self.spin_router_settle.value(), router_wait_selector=self.router_wait_sel.text().strip() or None,
             router_allow=[p.strip() for p in self.router_allow.text().split(',') if p.strip()] or None, router_deny=[p.strip() for p in self.router_deny.text().split(',') if p.strip()] or None, router_quiet=self.chk_router_quiet.isChecked(),
             no_manifest=False, checksums=self.chk_checksums.isChecked(), checksum_ext=self.checksum_ext.text().strip() or None, verify_after=self.chk_verify_after.isChecked(), verify_deep=self.chk_verify_deep.isChecked(),

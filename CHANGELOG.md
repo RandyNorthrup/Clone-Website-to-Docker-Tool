@@ -1,4 +1,19 @@
 # Changelog
+## [1.1.5] - 2025-10-01
+
+### Added (DOM Stabilization Heuristic)
+
+- New `--dom-stable-ms N` flag (GUI: Dom Stable (ms)) to require a quiet window of N milliseconds with no DOM mutations before capturing each prerendered page. Uses a lightweight `MutationObserver` to update a timestamp; polling stops when the window elapses or timeout triggers.
+- New `--dom-stable-timeout-ms M` to cap the additional wait per page (default 4000ms). Prevents pathological long waits on pages with constant animations.
+- Manifest fields: `dom_stable_ms`, `dom_stable_timeout_ms`; prerender stats enriched with `dom_stable_pages` (pages achieving stability) and `dom_stable_total_wait_ms` (aggregate wait).
+- Reproduction command includes these flags when active.
+
+### Notes (DOM Stabilization)
+
+- Recommended starting value: 500–1000ms. Larger values increase fidelity but slow prerender dramatically on very dynamic pages.
+- If the timeout is hit without a quiet window, the current DOM is captured (best-effort mode).
+- Complements `--prerender-scroll`; combine scroll passes followed by stabilization to allow lazy content to load then settle.
+
 
 All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
 

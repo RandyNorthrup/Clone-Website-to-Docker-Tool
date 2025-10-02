@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.
@@ -401,6 +401,8 @@ def parse_rate_to_bps(text: str) -> int | None: return parse_size_to_bytes(text)
 def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages: int = 40,
                    capture_api: bool = False, hook_script: str | None = None,
                    scroll_passes: int = 0,  # new: number of incremental scrolls per page to trigger lazy load
+                   dom_stable_ms: int = 0,  # new: quiet DOM mutation window required before snapshot (0 disables)
+                   dom_stable_timeout_ms: int = 4000,  # new: max additional wait for stability
                    capture_storage: bool = False,
                    capture_api_types: list[str] | None = None,
                    capture_api_binary: bool = False,
@@ -522,6 +524,9 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                     pass
             context.on('response', on_response)
         pages_processed=0
+    # Track DOM stabilization statistics
+    dom_stable_total_wait_ms = 0
+    dom_stable_pages = 0
     while to_visit and pages_processed < max_pages:
         url = to_visit.pop(0)
         if url in visited: continue
@@ -581,6 +586,38 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                         page.wait_for_timeout(350)
                 except Exception:
                     pass
+            # Optional DOM stabilization wait using MutationObserver heuristic
+            if dom_stable_ms and dom_stable_ms > 0:
+                try:
+                    page.add_init_script("""
+                        (()=>{try{window.__cw2dt_last_mut=Date.now(); if(!window.__cw2dt_observer){const obs=new MutationObserver(()=>{window.__cw2dt_last_mut=Date.now();}); obs.observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true}); window.__cw2dt_observer=obs;}}catch(e){}}
+                        )();
+                    """)
+                except Exception:
+                    pass
+                waited_ms = 0
+                stable_reached = False
+                start_wait = time.time()
+                try:
+                    # Poll until we observe a quiet window of dom_stable_ms (no mutations)
+                    # or until timeout is exceeded.
+                    while True:
+                        last_delta = page.evaluate("Date.now() - (window.__cw2dt_last_mut || Date.now())")
+                        if isinstance(last_delta, (int, float)) and last_delta >= dom_stable_ms:
+                            stable_reached = True
+                            break
+                        elapsed = (time.time() - start_wait) * 1000.0
+                        if elapsed >= max(dom_stable_timeout_ms, dom_stable_ms):
+                            break
+                        # Sleep in small increments (min of 200ms or 1/3 target window)
+                        sleep_for = min(200, max(50, dom_stable_ms // 3))
+                        page.wait_for_timeout(sleep_for)
+                    waited_ms = int((time.time() - start_wait) * 1000.0)
+                except Exception:
+                    pass
+                dom_stable_total_wait_ms += waited_ms
+                if stable_reached:
+                    dom_stable_pages += 1
             html = page.content();
             if rewrite_urls and origin:
                 html = html.replace(origin, '')
@@ -646,7 +683,9 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
         'routes_discovered': len(router_seen) if router_intercept else 0,
         'api_captured': len(captured) if capture_api else 0,
         'storage_captured': storage_snapshots if capture_storage else 0,
-        'scroll_passes': int(scroll_passes) if scroll_passes else 0
+        'scroll_passes': int(scroll_passes) if scroll_passes else 0,
+        'dom_stable_pages': dom_stable_pages if dom_stable_ms else 0,
+        'dom_stable_total_wait_ms': dom_stable_total_wait_ms if dom_stable_ms else 0
     }
     if progress_percent_cb:
         try: progress_percent_cb(100)
@@ -675,6 +714,8 @@ class CloneConfig:
     prerender: bool = False
     prerender_max_pages: int = DEFAULT_PRERENDER_MAX_PAGES
     prerender_scroll: int = 0  # number of scroll passes per prerendered page (0 disabled)
+    dom_stable_ms: int = 0  # quiet mutation window required before snapshot (0 disables)
+    dom_stable_timeout_ms: int = 4000  # max additional wait per page to achieve stability
     capture_api: bool = False
     capture_api_types: Optional[List[str]] = None  # list of content-type prefixes (defaults to application/json)
     capture_api_binary: bool = False  # capture selected binary types (pdf, images, etc.)
@@ -861,6 +902,10 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
             cmd.append(f"--prerender-max-pages={cfg.prerender_max_pages}")
         if getattr(cfg,'prerender_scroll',0):
             cmd.append(f"--prerender-scroll={cfg.prerender_scroll}")
+        if getattr(cfg,'dom_stable_ms',0):
+            cmd.append(f"--dom-stable-ms={cfg.dom_stable_ms}")
+            if getattr(cfg,'dom_stable_timeout_ms',4000) != 4000:
+                cmd.append(f"--dom-stable-timeout-ms={cfg.dom_stable_timeout_ms}")
         if cfg.capture_api:
             cmd.append("--capture-api")
             if cfg.capture_api_types:
@@ -1191,6 +1236,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 max_pages=cfg.prerender_max_pages,
                 capture_api=cfg.capture_api,
                 scroll_passes=getattr(cfg,'prerender_scroll',0),
+                dom_stable_ms=getattr(cfg,'dom_stable_ms',0),
+                dom_stable_timeout_ms=getattr(cfg,'dom_stable_timeout_ms',4000),
                 capture_storage=cfg.capture_storage,
                 capture_api_types=cfg.capture_api_types,
                 capture_api_binary=cfg.capture_api_binary,
@@ -1457,6 +1504,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 'prerender':cfg.prerender,
                 'prerender_max_pages': cfg.prerender_max_pages if cfg.prerender else None,
                 'prerender_scroll_passes': cfg.prerender_scroll if (cfg.prerender and cfg.prerender_scroll) else 0,
+                'dom_stable_ms': cfg.dom_stable_ms if (cfg.prerender and cfg.dom_stable_ms) else 0,
+                'dom_stable_timeout_ms': cfg.dom_stable_timeout_ms if (cfg.prerender and cfg.dom_stable_ms) else 0,
                 'capture_api':cfg.capture_api if cfg.prerender else False,  # primary key (new schema)
                 'api_capture':cfg.capture_api if cfg.prerender else False,   # legacy alias parity
                 'capture_api_types': cfg.capture_api_types if (cfg.prerender and cfg.capture_api) else None,
@@ -1838,6 +1887,8 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--prerender', action='store_true', help='After clone, prerender dynamic pages with Playwright (optional)')
     parser.add_argument('--prerender-max-pages', type=int, default=40)
     parser.add_argument('--prerender-scroll', type=int, default=0, help='Number of incremental scroll passes per prerendered page to trigger lazy loading (0=disabled)')
+    parser.add_argument('--dom-stable-ms', type=int, default=0, help='Require this many ms of no DOM mutations before capturing each prerendered page (heuristic). 0=disabled')
+    parser.add_argument('--dom-stable-timeout-ms', type=int, default=4000, help='Maximum additional wait per page attempting to reach a stable DOM (ignored if dom-stable-ms=0)')
     parser.add_argument('--capture-api', action='store_true', help='Capture API responses during prerender (JSON by default)')
     parser.add_argument('--capture-api-types', default=None, help='Slash- or comma-separated list of content-type prefixes to capture (e.g. application/json,text/csv)')
     parser.add_argument('--capture-api-binary', action='store_true', help='Also capture common binary types (pdf, images, octet-stream)')
@@ -1903,6 +1954,7 @@ def headless_main(argv: list[str]) -> int:
         bind_ip=args.bind_ip, host_port=args.host_port, container_port=args.container_port, size_cap=args.size_cap,
     throttle=args.throttle, auth_user=args.auth_user, auth_pass=args.auth_pass, cookies_file=args.cookies_file, import_browser_cookies=args.import_browser_cookies, disable_js=args.disable_js,
         prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, prerender_scroll=args.prerender_scroll, capture_api=args.capture_api,
+    dom_stable_ms=args.dom_stable_ms, dom_stable_timeout_ms=args.dom_stable_timeout_ms,
         capture_api_types=_cap_types, capture_api_binary=args.capture_api_binary,
         capture_storage=args.capture_storage,
         hook_script=args.hook_script, rewrite_urls=(not args.no_url_rewrite), router_intercept=args.router_intercept,

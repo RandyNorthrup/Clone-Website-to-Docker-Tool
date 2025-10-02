@@ -294,6 +294,7 @@ When `--prerender` (or the GUI checkbox) is enabled:
 8. If a `--hook-script` is provided and exports `on_page(page, url, context)`, it is invoked before HTML extraction (ideal for login flows, expanding lazy content, or scraping single-page app states).
 9. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
 10. The prerender queue stops when either the page limit is reached or there are no more same‑origin links/routes to process.
+11. (Optional) If `--dom-stable-ms N` is supplied, a lightweight MutationObserver heuristic waits until there has been a quiet window of N milliseconds with no DOM mutations (or the `--dom-stable-timeout-ms` is reached) before snapshotting each page. This helps avoid capturing intermediate loading states in JS-heavy apps.
 
 ### Live Metrics
 
@@ -323,6 +324,8 @@ Flags:
 - `--router-wait-selector CSS` — optional selector to await before snapshot (e.g. `#app-root`)
 - `--router-allow PAT1,PAT2` — only routes matching any regex pattern are kept
 - `--router-deny PAT1,PAT2` — discard routes matching any regex pattern (applied after allow)
+- `--dom-stable-ms N` — require N ms of no DOM mutations before capturing (heuristic stabilization)
+- `--dom-stable-timeout-ms M` — maximum additional wait attempting stability per page (default 4000)
 
 GUI exposes: Router intercept, Include #hash, Max routes, Settle (ms), and Wait selector.
 
