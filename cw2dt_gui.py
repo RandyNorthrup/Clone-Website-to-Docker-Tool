@@ -198,7 +198,12 @@ class DockerClonerGUI(QWidget):
         self.extra_wget_args_in=QLineEdit(); self.extra_wget_args_in.setPlaceholderText('Extra wget2 args e.g. --retry-on-http-error=429,500,503')
         self.btn_diagnose=QPushButton('Diagnose Last Error')
         self.btn_diagnose.clicked.connect(self._run_diagnostics)
-        for w in (QLabel('User-Agent Override:'), self.user_agent_in, QLabel('Extra wget2 Args:'), self.extra_wget_args_in, self.btn_diagnose): trouble.addWidget(w)
+        self.chk_auto_backoff=QCheckBox('Auto Backoff Retry')
+        self.chk_log_redirect_chain=QCheckBox('Log Redirect Chain')
+        self.chk_save_wget_stderr=QCheckBox('Save wget stderr')
+        for w in (QLabel('User-Agent Override:'), self.user_agent_in, QLabel('Extra wget2 Args:'), self.extra_wget_args_in,
+                  self.chk_auto_backoff, self.chk_log_redirect_chain, self.chk_save_wget_stderr, self.btn_diagnose):
+            trouble.addWidget(w)
         config_v.addWidget(trouble)
         config_v.addStretch(1)
         # Footer reset defaults button spanning width
@@ -357,6 +362,9 @@ class DockerClonerGUI(QWidget):
             'user_agent_in':"Optional custom User-Agent string sent with wget2 and prerender fetches (helps bypass simplistic bot blocks).",
             'extra_wget_args_in':"Raw extra wget2 arguments (advanced). Use for retry tuning, header overrides, or debugging issues.",
             'btn_diagnose':"Analyze last error lines and suggest troubleshooting actions (UA override, retries, concurrency tweaks).",
+            'chk_auto_backoff':"If initial clone fails (server/5xx), retry once with fewer threads + retry/backoff args.",
+            'chk_log_redirect_chain':"Preflight HEAD/GET to log the redirect chain before cloning.",
+            'chk_save_wget_stderr':"Save full wget2 stderr to wget_stderr.log inside output folder for deep analysis.",
         }
         for name,text in tt.items():
             w=getattr(self,name,None)
@@ -563,6 +571,9 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         self.plugins_dir.setText('')
         if hasattr(self,'user_agent_in'): self.user_agent_in.setText('')
         if hasattr(self,'extra_wget_args_in'): self.extra_wget_args_in.setText('')
+        if hasattr(self,'chk_auto_backoff'): self.chk_auto_backoff.setChecked(False)
+        if hasattr(self,'chk_log_redirect_chain'): self.chk_log_redirect_chain.setChecked(False)
+        if hasattr(self,'chk_save_wget_stderr'): self.chk_save_wget_stderr.setChecked(False)
         # Re-run interlock logic and dependency banner
         self._on_prerender_toggled(self.chk_prerender.isChecked())
         self._update_dependency_banner()
@@ -595,7 +606,10 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'auth_user': self.auth_user.text().strip(), 'auth_pass': self.auth_pass.text().strip(), 'cookies_file': self.cookies_file.text().strip(), 'import_browser_cookies': self.chk_import_browser_cookies.isChecked(),
             'plugins_dir': self.plugins_dir.text().strip(),
             'user_agent': self.user_agent_in.text().strip() if hasattr(self,'user_agent_in') else '',
-            'extra_wget_args': self.extra_wget_args_in.text().strip() if hasattr(self,'extra_wget_args_in') else ''
+            'extra_wget_args': self.extra_wget_args_in.text().strip() if hasattr(self,'extra_wget_args_in') else '',
+            'auto_backoff': self.chk_auto_backoff.isChecked() if hasattr(self,'chk_auto_backoff') else False,
+            'log_redirect_chain': self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
+            'save_wget_stderr': self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
         }
     def _apply_profile_dict(self, data: dict):
         try:
@@ -649,6 +663,9 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             self.plugins_dir.setText(data.get('plugins_dir',''))
             if hasattr(self,'user_agent_in'): self.user_agent_in.setText(data.get('user_agent',''))
             if hasattr(self,'extra_wget_args_in'): self.extra_wget_args_in.setText(data.get('extra_wget_args',''))
+            if hasattr(self,'chk_auto_backoff'): self.chk_auto_backoff.setChecked(bool(data.get('auto_backoff')))
+            if hasattr(self,'chk_log_redirect_chain'): self.chk_log_redirect_chain.setChecked(bool(data.get('log_redirect_chain')))
+            if hasattr(self,'chk_save_wget_stderr'): self.chk_save_wget_stderr.setChecked(bool(data.get('save_wget_stderr')))
             # Refresh wizard availability after loading profile
             try:
                 self.btn_wizard.setEnabled(bool(self.url_in.text().strip()))
@@ -938,7 +955,10 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             incremental=self.chk_incremental.isChecked(), diff_latest=self.chk_diff.isChecked(), plugins_dir=self.plugins_dir.text().strip() or None, json_logs=False, profile=False,
             open_browser=self.chk_open_browser.isChecked(), run_built=self.chk_run_built.isChecked(), serve_folder=self.chk_serve.isChecked(), estimate_first=self.chk_estimate_first.isChecked(),
             user_agent=(self.user_agent_in.text().strip() or None) if hasattr(self,'user_agent_in') else None,
-            extra_wget_args=(self.extra_wget_args_in.text().strip() or None) if hasattr(self,'extra_wget_args_in') else None
+            extra_wget_args=(self.extra_wget_args_in.text().strip() or None) if hasattr(self,'extra_wget_args_in') else None,
+            auto_backoff=self.chk_auto_backoff.isChecked() if hasattr(self,'chk_auto_backoff') else False,
+            log_redirect_chain=self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
+            save_wget_stderr=self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
         )
         setattr(cfg,'cleanup', self.chk_cleanup.isChecked())
         return cfg
