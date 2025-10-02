@@ -1011,6 +1011,10 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
             tail=list(last_lines)[-8:]
             for ln in tail:
                 _invoke(cb,'log',f"[wget2][tail] {ln}")
+            # Specialized pattern diagnostics
+            port_errs=[l for l in last_lines if 'Port number must be in the range' in l]
+            if len(port_errs) >= 3:
+                _invoke(cb,'log',"[hint] Repeated 'Port number must be in the range 1..65535' messages detected. This usually indicates malformed URLs (e.g. duplicated colon, stray : characters, or a space breaking the URL) or an upstream redirect appending an invalid port. Verify the URL exactly as wget2 sees it and consider using --print-repro to inspect the command. If the site forces an invalid Location: header, try adding --max-redirect=0 in Extra wget args and test manually.")
         _invoke(cb, 'log', f"[error] wget2 exit code {proc.returncode} – {hint}")
         return False
     if last_pct < 100:
