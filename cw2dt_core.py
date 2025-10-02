@@ -747,6 +747,15 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             page.close()
         except Exception as e:
             emit(f"Failed prerender {url}: {e}")
+            # Special handling: intermittent Playwright runtime teardown or loop closure
+            msg=str(e)
+            if 'Event loop is closed' in msg or 'Target page, context or browser has been closed' in msg:
+                emit("Playwright runtime appears unavailable (event loop closed) – skipping remaining prerender pages. This often indicates an environment or browser install issue. Run: 'pip install playwright --upgrade && playwright install chromium' then retry.")
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                return {'_playwright_missing': True, 'pages_processed': pages_processed}
     browser.close()
     # If no pages processed ensure hook ran at least once (page param None for fallback)
     if hook_fn and pages_processed == 0:
