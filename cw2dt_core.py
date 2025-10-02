@@ -827,6 +827,8 @@ class CloneConfig:
     cleanup: bool = False  # optional cleanup of helper build artifacts after successful build
     events_file: Optional[str] = None  # optional NDJSON event sink
     progress_mode: str = 'plain'  # 'plain' or 'rich'
+    user_agent: Optional[str] = None  # optional custom user-agent override for wget2 & prerender fetches
+    extra_wget_args: Optional[str] = None  # raw extra arguments appended to wget2 invocation (advanced troubleshooting)
     # internal cancellation hook (GUI injects)
     cancel_event: Any = None
     # internal / reserved
@@ -1073,6 +1075,21 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
         cmd.append(f"--throttle={cfg.throttle}")
     if cfg.jobs and cfg.jobs > 1:
         cmd.append(f"--jobs={cfg.jobs}")
+    ua_val = getattr(cfg,'user_agent',None)
+    if isinstance(ua_val,str) and ua_val.strip():
+        # Add quoting minimal shell reproduction
+        if ' ' in ua_val:
+            cmd.append(f"--user-agent=\"{ua_val}\"")
+        else:
+            cmd.append(f"--user-agent={ua_val}")
+    extra_args_val = getattr(cfg,'extra_wget_args',None)
+    if isinstance(extra_args_val,str) and extra_args_val.strip():
+        import shlex
+        try:
+            for tok in shlex.split(extra_args_val):
+                cmd.append(tok)
+        except Exception:
+            pass
     if cfg.checksums:
         cmd.append("--checksums")
         if cfg.checksum_ext:
@@ -1277,6 +1294,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
     except Exception:
         pass
     wget_cmd = [ 'wget2','-e','robots=off','--mirror','--convert-links','--adjust-extension','--page-requisites','--no-parent','--continue','--progress=dot:mega', cfg.url,'-P', output_folder ]
+    if isinstance(getattr(cfg,'user_agent',None),str) and cfg.user_agent:
+        wget_cmd += ['--user-agent', cfg.user_agent]
     # Cookie handling: existing cookie file first
     if cfg.cookies_file and os.path.exists(cfg.cookies_file):
         wget_cmd += ['--load-cookies', cfg.cookies_file]
@@ -1347,6 +1366,17 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 pass
         else:
             log('[warn] wget2 concurrency flag not detected (no --max-threads / --jobs in help); using default threading.')
+    # Append any extra raw wget args (advanced troubleshooting)
+    extra_args_val = getattr(cfg,'extra_wget_args',None)
+    if isinstance(extra_args_val,str) and extra_args_val.strip():
+        import shlex
+        try:
+            extra_tokens=shlex.split(extra_args_val)
+            if extra_tokens:
+                wget_cmd += extra_tokens
+                log(f"[info] extra wget args: {' '.join(extra_tokens)}")
+        except Exception as e:
+            log(f"[warn] could not parse extra wget args: {e}")
     if cfg.size_cap:
         b = parse_size_to_bytes(cfg.size_cap)
         if b: wget_cmd += ['--quota', human_quota_suffix(b)]
