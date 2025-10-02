@@ -202,12 +202,26 @@ class DockerClonerGUI(QWidget):
         row2.addStretch(1)
         rv.addLayout(row1); rv.addLayout(row2)
         self.prog=QProgressBar(); self.prog.setRange(0,100); rv.addWidget(self.prog)
+        # Lightweight dependency banner (hidden unless something missing)
+        from PySide6.QtWidgets import QFrame
+        self.dep_banner=QFrame(); self.dep_banner.setVisible(False)
+        self.dep_banner.setFrameShape(QFrame.Shape.StyledPanel)
+        db_lay=QHBoxLayout(self.dep_banner); db_lay.setContentsMargins(6,4,6,4); db_lay.setSpacing(6)
+        self.dep_banner_lbl=QLabel('Dependencies OK'); self.dep_banner_lbl.setObjectName('depBannerLabel'); db_lay.addWidget(self.dep_banner_lbl,1)
+        self.dep_fix_btn=QPushButton('Details / Fix'); db_lay.addWidget(self.dep_fix_btn)
+        self.dep_fix_btn.clicked.connect(self._show_deps_dialog)
+        self.dep_banner.setStyleSheet('QFrame { background:#532; border:1px solid #a55; border-radius:4px;} QLabel#depBannerLabel { color:#f6d5d0; font-weight:500;}')
+        rv.addWidget(self.dep_banner)
         self.console=QTextEdit(); self.console.setReadOnly(True); rv.addWidget(self.console,1)
         self.splitter.addWidget(right); self.splitter.setStretchFactor(0,0); self.splitter.setStretchFactor(1,1)
         # Connections
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self.btn_wizard.clicked.connect(self._run_wizard)
+        # Dynamic interlocks
+        self.chk_prerender.toggled.connect(self._on_prerender_toggled)
+        for cap in (self.chk_capture_api,self.chk_capture_api_binary,self.chk_capture_graphql,self.chk_capture_storage):
+            cap.toggled.connect(self._on_capture_flag_toggled)
         # Enable Wizard only when a non-empty URL is present
         def _update_wizard_enabled(txt:str):
             self.btn_wizard.setEnabled(bool(txt.strip()))
@@ -437,7 +451,33 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         msgs=[]
         if not is_wget2_available(): msgs.append('wget2 missing')
         if self.chk_build.isChecked() and not docker_available(): msgs.append('docker missing')
-        if msgs: self.status_lbl.setText(' / '.join(msgs))
+        if msgs:
+            self.status_lbl.setText(' / '.join(msgs))
+            if self.dep_banner:
+                self.dep_banner_lbl.setText('Missing: '+', '.join(msgs))
+                self.dep_banner.setVisible(True)
+        else:
+            if self.dep_banner:
+                self.dep_banner.setVisible(False)
+
+    # -------- Dynamic Interlocks --------
+    def _on_prerender_toggled(self, on: bool):
+        # Disable capture checkboxes if prerender off (visual guidance) but keep state so if re-enabled they come back.
+        for cap in (self.chk_capture_api,self.chk_capture_api_binary,self.chk_capture_graphql,self.chk_capture_storage):
+            cap.setEnabled(on)
+        if not on:
+            # Show a gentle hint in console if any were checked
+            if any(c.isChecked() for c in (self.chk_capture_api,self.chk_capture_api_binary,self.chk_capture_graphql,self.chk_capture_storage)):
+                self._on_log('[gui] prerender disabled – dynamic capture flags will be ignored until re-enabled')
+        else:
+            self._on_log('[gui] prerender enabled')
+        self._update_dependency_banner()
+
+    def _on_capture_flag_toggled(self, on: bool):
+        if on and not self.chk_prerender.isChecked():
+            # Auto-enable prerender since captures depend on it
+            self._on_log('[gui] enabling prerender (required for capture)')
+            self.chk_prerender.setChecked(True)
 
     # ------------------- Profiles (Save / Load) -------------------
     def _profiles_dir(self):
@@ -550,29 +590,44 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             QMessageBox.warning(self,'Load Failed', str(e))
 
     # ------------------- Wizard (Recommendation) -------------------
-    def _scan_site_features(self, url: str, timeout: float=6.0) -> dict:
+    def _scan_site_features(self, url: str, timeout: float = 6.0) -> dict:
         """Fetch root page and run lightweight heuristics to recommend settings.
-        Heuristics:
-          - Detect SPA / frameworks (react/vue/angular/next/nuxt) -> enable prerender + router intercept.
-          - Detect large script count (>15) -> recommend prerender (dynamic) OR suggest JS stripping (optional) if hardening.
-          - If inline JSON blobs / hydration markers found -> prerender.
-          - If page size < 35KB and few scripts -> static (no prerender needed).
+        Extended Heuristics:
+          - Framework markers (react/vue/angular/next/nuxt/svelte) or hydration markers => prerender + router intercept.
+          - Script count >15 => prerender. >25 => strong dynamic signal. >40 => suggest API + storage + binary API capture.
+          - Inline ld+json / application/json script tags (>2) => API capture; (>4) => also storage snapshot & binary API capture.
+          - GraphQL keyword => suggest GraphQL capture.
+          - '/api/' or '.json' references in markup => API capture.
+          - Page size <35KB AND <=4 scripts AND no frameworks => static (disable prerender if previously assumed).
+          - Heavy dynamic (scripts>25 or size>120KB) => suggest checksums + incremental/diff for change tracking.
+        Returns an info dict with 'recommend' plus heuristic counts.
         """
         import urllib.request, urllib.error
-        info={'fetched':False,'error':None,'size':0,'scripts':0,'frameworks':[], 'recommend':{}}
+        info = {
+            'fetched': False,
+            'error': None,
+            'size': 0,
+            'scripts': 0,
+            'frameworks': [],
+            'recommend': {},
+            'inline_json': 0,
+            'graphql_hint': False,
+            'api_hint': False,
+        }
         try:
-            req=urllib.request.Request(url, headers={'User-Agent':'cw2dt-wizard/1.0'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'cw2dt-wizard/1.0'})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw=resp.read(250_000)  # cap at 250KB
-            info['fetched']=True; info['size']=len(raw)
+                raw = resp.read(250_000)  # cap at 250KB
+            info['fetched'] = True
+            info['size'] = len(raw)
             try:
-                text=raw.decode('utf-8','ignore')
+                text = raw.decode('utf-8', 'ignore')
             except Exception:
-                text=''
+                text = ''
             import re
-            script_tags=re.findall(r'<script\b', text, re.IGNORECASE)
-            info['scripts']=len(script_tags)
-            fw_patterns={
+            script_tags = re.findall(r'<script\b', text, re.IGNORECASE)
+            info['scripts'] = len(script_tags)
+            fw_patterns = {
                 'react': r'react[^a-zA-Z0-9]|data-reactroot|__REACT_DEVTOOLS_GLOBAL_HOOK__',
                 'vue': r'vue(?:\.runtime)?\.js|__VUE_DEVTOOLS_GLOBAL_HOOK__',
                 'angular': r'ng-version="|angular[^a-zA-Z0-9]',
@@ -580,24 +635,47 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                 'nuxt': r'__NUXT__',
                 'svelte': r'svelte[^a-zA-Z0-9]|data-svelte',
             }
-            found=[]
-            for name,pat in fw_patterns.items():
-                if re.search(pat, text): found.append(name)
-            info['frameworks']=found
-            rec=info['recommend']
-            dynamic = bool(found) or (info['scripts']>15) or ('__NEXT_DATA__' in text or '__NUXT__' in text)
+            found = []
+            for name, pat in fw_patterns.items():
+                if re.search(pat, text):
+                    found.append(name)
+            info['frameworks'] = found
+            # Additional signals
+            inline_json = re.findall(r'<script[^>]+application/(?:ld\+)?json', text, re.IGNORECASE)
+            info['inline_json'] = len(inline_json)
+            tl = text.lower()
+            if 'graphql' in tl:
+                info['graphql_hint'] = True
+            if '/api/' in tl or '.json' in tl:
+                info['api_hint'] = True
+            rec = info['recommend']
+            dynamic = bool(found) or (info['scripts'] > 15) or ('__NEXT_DATA__' in text or '__NUXT__' in text)
             if dynamic:
-                rec['prerender']=True
-                if any(f in found for f in ('react','vue','nextjs','nuxt','angular','svelte')):
-                    rec['router_intercept']=True
-            if info['size']<35_000 and info['scripts']<=4 and not found:
-                rec['prerender']=False
-            # If many external scripts but no frameworks, still consider prerender
-            if info['scripts']>25 and not found:
-                rec['prerender']=True
+                rec['prerender'] = True
+                if any(f in found for f in ('react', 'vue', 'nextjs', 'nuxt', 'angular', 'svelte')):
+                    rec['router_intercept'] = True
+            # Static override
+            if info['size'] < 35_000 and info['scripts'] <= 4 and not found:
+                rec['prerender'] = False
+            # If many scripts but no frameworks, still consider prerender
+            if info['scripts'] > 25 and not found:
+                rec['prerender'] = True
+            # API / storage capture heuristics (only if prerender is on)
+            if rec.get('prerender'):
+                if info['scripts'] > 25 or info['inline_json'] > 2 or info['api_hint']:
+                    rec['capture_api'] = True
+                if info['scripts'] > 40 or info['inline_json'] > 4:
+                    rec['capture_storage'] = True
+                    rec['capture_api_binary'] = True
+                if info.get('graphql_hint'):
+                    rec['capture_graphql'] = True
+            # Integrity suggestions
+            if rec.get('prerender') and (info['scripts'] > 25 or info['size'] > 120_000):
+                rec['checksums'] = True
+                rec['incremental'] = True
             return info
         except Exception as e:
-            info['error']=str(e)
+            info['error'] = str(e)
             return info
     def _run_wizard(self):
         """Two-phase wizard: (1) Scan (dry-run heuristics) (2) Results with Apply/Cancel.
@@ -619,6 +697,9 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             reasons=[]
             if info.get('frameworks'): reasons.append('Framework(s): '+','.join(info['frameworks']))
             if info.get('scripts',0)>25: reasons.append('Heavy script usage')
+            if info.get('inline_json',0)>2: reasons.append('Inline JSON data blobs')
+            if info.get('graphql_hint'): reasons.append('GraphQL markers present')
+            if info.get('api_hint'): reasons.append('REST/JSON references present')
             if info.get('scripts',0)<=4 and not info.get('frameworks'): reasons.append('Likely static (few scripts)')
             if info.get('size',0)<35_000: reasons.append('Small initial payload (<35KB)')
             info['reasons']=reasons
@@ -654,52 +735,83 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         scan_dlg.exec()
 
     def _apply_wizard_recommendations(self, info: dict, chk_states: dict):
-        # chk_states contains final user-selected booleans for recs
+        """Apply selected recommendation checkboxes to the main form."""
+        # Core prerender / routing
         if chk_states.get('prerender') is not None:
             self.chk_prerender.setChecked(chk_states['prerender'])
         if chk_states.get('router_intercept') is not None:
             self.chk_router.setChecked(chk_states['router_intercept'])
             if chk_states['router_intercept'] and info.get('frameworks'):
+                # If SPA framework, enabling hash route can aid deeper capture
                 self.chk_route_hash.setChecked(True)
-        if chk_states.get('js_strip') is not None:
-            self.chk_disable_js.setChecked(chk_states['js_strip'])
+        # Integrity & change tracking
         if chk_states.get('checksums') is not None:
             self.chk_checksums.setChecked(chk_states['checksums'])
             self.chk_verify_after.setChecked(chk_states['checksums'])
         if chk_states.get('incremental') is not None:
             self.chk_incremental.setChecked(chk_states['incremental'])
             self.chk_diff.setChecked(chk_states['incremental'])
+        # Hardening
+        if chk_states.get('js_strip') is not None:
+            self.chk_disable_js.setChecked(chk_states['js_strip'])
+        # Dynamic capture flags
+        if hasattr(self, 'chk_capture_api') and chk_states.get('capture_api') is not None:
+            self.chk_capture_api.setChecked(chk_states['capture_api'])
+        if hasattr(self, 'chk_capture_api_binary') and chk_states.get('capture_api_binary') is not None:
+            self.chk_capture_api_binary.setChecked(chk_states['capture_api_binary'])
+        if hasattr(self, 'chk_capture_storage') and chk_states.get('capture_storage') is not None:
+            self.chk_capture_storage.setChecked(chk_states['capture_storage'])
+        if hasattr(self, 'chk_capture_graphql') and chk_states.get('capture_graphql') is not None:
+            self.chk_capture_graphql.setChecked(chk_states['capture_graphql'])
+        # Ensure prerequisite: if any capture flag enabled but prerender disabled, force-enable prerender
+        if (self.chk_capture_api.isChecked() or self.chk_capture_api_binary.isChecked() or
+            self.chk_capture_storage.isChecked() or self.chk_capture_graphql.isChecked()) and not self.chk_prerender.isChecked():
+            self.chk_prerender.setChecked(True)
+            self._on_log('[wizard] prerender enabled automatically (required for selected capture flags)')
         self._on_log('[wizard] applied recommendations')
 
     def _wizard_show_results(self, info: dict):
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QCheckBox, QHBoxLayout, QFrame
-        dlg=QDialog(self); dlg.setWindowTitle('Wizard – Results')
-        lay=QVBoxLayout(dlg)
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QCheckBox, QFrame
+        dlg = QDialog(self); dlg.setWindowTitle('Wizard – Results')
+        lay = QVBoxLayout(dlg)
         if info.get('error'):
-            lay.addWidget(QLabel('Fetch error: '+info['error']))
+            lay.addWidget(QLabel('Fetch error: ' + info['error']))
         else:
-            summary=f"Fetched {info['size']} bytes • scripts={info['scripts']} • frameworks={','.join(info['frameworks']) or 'none'}"
+            summary = f"Fetched {info['size']} bytes • scripts={info['scripts']} • frameworks={','.join(info['frameworks']) or 'none'}"
             if info.get('estimated_items') is not None:
                 summary += f" • est items={info['estimated_items']}"
             lay.addWidget(QLabel(summary))
             if info.get('reasons'):
-                lay.addWidget(QLabel('Heuristics: '+ '; '.join(info['reasons'])))
-        rec=info.get('recommend',{})
+                lay.addWidget(QLabel('Heuristics: ' + '; '.join(info['reasons'])))
+        rec = info.get('recommend', {})
         # Checkbox panel
-        chk_prer=QCheckBox('Enable prerender (dynamic rendering)'); chk_prer.setChecked(rec.get('prerender', self.chk_prerender.isChecked()))
-        chk_router=QCheckBox('Enable router interception (SPA routes)'); chk_router.setChecked(rec.get('router_intercept', self.chk_router.isChecked()))
-        chk_js=QCheckBox('Strip JavaScript (harden output)'); chk_js.setChecked(self.chk_disable_js.isChecked())
-        chk_checksums=QCheckBox('Checksums + verify integrity'); chk_checksums.setChecked(self.chk_checksums.isChecked() or self.chk_verify_after.isChecked())
-        chk_incremental=QCheckBox('Incremental + diff state tracking'); chk_incremental.setChecked(self.chk_incremental.isChecked() or self.chk_diff.isChecked())
-        for w in (chk_prer, chk_router, chk_js, chk_checksums, chk_incremental): lay.addWidget(w)
-        sep=QFrame(); sep.setFrameShape(QFrame.Shape.HLine); lay.addWidget(sep)
-        bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
+        chk_prer = QCheckBox('Enable prerender (dynamic rendering)'); chk_prer.setChecked(rec.get('prerender', self.chk_prerender.isChecked()))
+        chk_router = QCheckBox('Enable router interception (SPA routes)'); chk_router.setChecked(rec.get('router_intercept', self.chk_router.isChecked()))
+        chk_js = QCheckBox('Strip JavaScript (harden output)'); chk_js.setChecked(self.chk_disable_js.isChecked())
+        chk_checksums = QCheckBox('Checksums + verify integrity'); chk_checksums.setChecked(rec.get('checksums', self.chk_checksums.isChecked() or self.chk_verify_after.isChecked()))
+        chk_incremental = QCheckBox('Incremental + diff state tracking'); chk_incremental.setChecked(rec.get('incremental', self.chk_incremental.isChecked() or self.chk_diff.isChecked()))
+        chk_api = QCheckBox('Capture API JSON'); chk_api.setChecked(rec.get('capture_api', self.chk_capture_api.isChecked()))
+        chk_api_bin = QCheckBox('Capture API Binary'); chk_api_bin.setChecked(rec.get('capture_api_binary', self.chk_capture_api_binary.isChecked()))
+        chk_storage = QCheckBox('Capture Storage (local/session)'); chk_storage.setChecked(rec.get('capture_storage', self.chk_capture_storage.isChecked()))
+        chk_graphql = QCheckBox('Capture GraphQL'); chk_graphql.setChecked(rec.get('capture_graphql', self.chk_capture_graphql.isChecked()))
+        for w in (chk_prer, chk_router, chk_js, chk_checksums, chk_incremental, chk_api, chk_api_bin, chk_storage, chk_graphql):
+            lay.addWidget(w)
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); lay.addWidget(sep)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
         lay.addWidget(bb)
-        applied={'done':False}
         def _apply():
-            chk={'prerender':chk_prer.isChecked(),'router_intercept':chk_router.isChecked(),'js_strip':chk_js.isChecked(),'checksums':chk_checksums.isChecked(),'incremental':chk_incremental.isChecked()}
+            chk = {
+                'prerender': chk_prer.isChecked(),
+                'router_intercept': chk_router.isChecked(),
+                'js_strip': chk_js.isChecked(),
+                'checksums': chk_checksums.isChecked(),
+                'incremental': chk_incremental.isChecked(),
+                'capture_api': chk_api.isChecked(),
+                'capture_api_binary': chk_api_bin.isChecked(),
+                'capture_storage': chk_storage.isChecked(),
+                'capture_graphql': chk_graphql.isChecked(),
+            }
             self._apply_wizard_recommendations(info, chk)
-            applied['done']=True
         bb.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(_apply)
         bb.rejected.connect(dlg.reject)
         bb.accepted.connect(_apply)
@@ -714,7 +826,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             cookies_file=self.cookies_file.text().strip() or None, import_browser_cookies=self.chk_import_browser_cookies.isChecked(), disable_js=self.chk_disable_js.isChecked(),
             prerender=self.chk_prerender.isChecked(), prerender_max_pages=self.spin_prer_pages.value(), capture_api=self.chk_capture_api.isChecked(), hook_script=self.hook_in.text().strip() or None, prerender_scroll=self.spin_prer_scroll.value(),
             capture_graphql=self.chk_capture_graphql.isChecked(), capture_storage=self.chk_capture_storage.isChecked(), capture_api_binary=self.chk_capture_api_binary.isChecked(),
-            capture_api_types=[t.strip() for t in re.split(r'[,/]', self.api_types_in.text().strip()) if t.strip()] or None,
+            # Parse API types: allow commas OR whitespace as separators; do NOT split on '/'
+            capture_api_types=[t.strip() for t in re.split(r'[\s,]+', self.api_types_in.text().strip()) if t.strip()] or None,
             dom_stable_ms=self.spin_dom_stable.value(), dom_stable_timeout_ms=self.spin_dom_stable_timeout.value(),
             rewrite_urls=True, router_intercept=self.chk_router.isChecked(), router_include_hash=self.chk_route_hash.isChecked(), router_max_routes=self.spin_router_max.value(), router_settle_ms=self.spin_router_settle.value(), router_wait_selector=self.router_wait_sel.text().strip() or None,
             router_allow=[p.strip() for p in self.router_allow.text().split(',') if p.strip()] or None, router_deny=[p.strip() for p in self.router_deny.text().split(',') if p.strip()] or None, router_quiet=self.chk_router_quiet.isChecked(),

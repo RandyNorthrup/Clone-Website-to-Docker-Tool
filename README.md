@@ -94,7 +94,7 @@ GUI Layout Notes:
 
 ### Wizard & Profiles
 
-The GUI includes a two‑phase Recommendation Wizard and profile management:
+The GUI includes a two‑phase Recommendation Wizard and profile management. The wizard now also evaluates inline JSON data blobs, GraphQL hints, potential REST endpoints, and overall dynamic weight to suggest API / storage capture and integrity options:
 
 #### Phase 1 – Scan
 
@@ -106,12 +106,16 @@ The GUI includes a two‑phase Recommendation Wizard and profile management:
 #### Phase 2 – Results
 
 - Presents a summary (bytes fetched, script count, frameworks, estimated items, reasons).
-- Lets you toggle and Apply recommended settings:
+- Provides recommendation checkboxes (pre‑toggled when heuristics fire):
   - Prerender (dynamic rendering)
-  - Router interception (SPA route discovery)
-  - JavaScript stripping (harden output)
-  - Checksums + verify (integrity phase)
+  - Router interception (SPA routes)
+  - Capture API JSON (`_api/`)
+  - Capture API Binary (PDF / images / octet-stream, etc.)
+  - Capture Storage (localStorage + sessionStorage snapshots)
+  - Capture GraphQL operations (`_graphql/`)
+  - Checksums + verify integrity
   - Incremental + diff state tracking
+  - (Optional) JavaScript stripping (not auto‑recommended; you can toggle manually)
 - Apply updates the main form; you can still manually tweak afterward.
 
 Profiles:
@@ -128,12 +132,17 @@ Typical Workflow:
 3. Save Config for reuse.
 4. Clone.
 
-Heuristic Hints:
+Heuristic Hints (current logic):
 
-- Large script count (> ~15) or known framework markers → enable prerender.
-- Detected framework + dynamic navigation hints → enable router interception.
-- Very small payload + few scripts → prerender likely unnecessary.
-- Heavy scripts but no framework markers → prerender still suggested (dynamic content suspected).
+- Script count > 15 OR SPA framework marker (React / Vue / Angular / Next / Nuxt / Svelte) → enable prerender.
+- Framework marker + dynamic assumption → also enable router interception.
+- Very small payload (< 35 KB) AND few scripts (≤ 4) AND no framework → disable prerender (likely static).
+- Heavy scripts (> 25) without framework → still treat as dynamic (prerender on).
+- Inline JSON/ld+json script tags > 2 OR obvious `/api/` or `.json` references → recommend API JSON capture.
+- Very heavy dynamic (scripts > 40 OR inline JSON > 4) → also recommend storage snapshot + binary API capture.
+- Presence of the word `graphql` → recommend GraphQL capture.
+- Heavy dynamic (scripts > 25 OR payload > ~120 KB) → suggest checksums + incremental for change tracking.
+- Any capture flag (API/storage/GraphQL) auto‑forces prerender if you manually disabled it.
 
 The Wizard intentionally keeps the scan shallow for speed; you can still refine settings manually for complex sites.
 
@@ -379,16 +388,20 @@ python cw2dt.py --headless \
   --prerender --prerender-max-pages 120 \
   --router-intercept --router-max-routes 350 --router-settle-ms 900 \
   --capture-api --capture-api-types application/json,text/plain --capture-api-binary --capture-storage \
-- `_api/` mirrors the URL path of captured responses. Directory indices (`/path/`) become `path/index.<ext>`.
-- Extension mapping heuristics: json -> `.json`, csv -> `.csv`, xml -> `.xml`, graphql -> `.graphql(.json)`, plain -> `.txt`; binary falls back to original inferred extension or `.bin`.
-- Provide multiple types with either commas or slashes: `--capture-api-types application/json,text/csv` or `--capture-api-types application/json/text/csv`.
-- Storage snapshots are per prerendered HTML page; only pages that actually have storage entries produce a `.storage.json` file.
-- Storage files include: `{ "url": <page_url>, "localStorage": {..}, "sessionStorage": {..} }`.
-- Checksums (when enabled) currently include HTML and captured JSON (and any extra extensions you list); binary API assets are not hashed unless you add their extensions via `--checksum-ext`.
+  --capture-graphql \
   --hook-script ./hooks/fidelity.py \
   --checksums --checksum-ext css,js,png,jpg,svg,json \
   --verify-after --incremental --diff-latest
 ```
+
+Details:
+
+- `_api/` mirrors the URL path of captured responses. Directory indices (`/path/`) become `path/index.<ext>`.
+- Extension mapping heuristics: json -> `.json`, csv -> `.csv`, xml -> `.xml`, graphql -> `.graphql(.json)`, plain -> `.txt`; binary falls back to inferred extension or `.bin`.
+- Provide multiple types with either commas or whitespace: `--capture-api-types application/json,text/csv` or `--capture-api-types application/json text/csv`.
+- Storage snapshots are per prerendered HTML page; only pages storing data produce a `.storage.json` file.
+- Storage files include: `{ "url": <page_url>, "localStorage": {..}, "sessionStorage": {..} }`.
+- Checksums include HTML + JSON (and any added extensions). Binary API assets are not hashed unless their extensions are listed.
 
 Recommendations:
 
@@ -396,10 +409,8 @@ Recommendations:
 - Tune `--router-settle-ms` upward for late async route pushes (900–1500ms for heavy frameworks).
 - Use `--router-allow` to fence param explosions (`--router-allow "/products/,/docs/"`).
 - Author a fidelity hook script to: dismiss cookie banners, expand menus, scroll, click tabs, trigger lazy loads.
-- Add extra checksum extensions for broader integrity coverage.
 
-
-Hook scaffold (`hooks/fidelity.py`):
+Hook script example:
 
 ```python
 def on_page(page, url, context):
