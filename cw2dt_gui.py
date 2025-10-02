@@ -1383,6 +1383,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                 code=int(hm.group(1))
                 if 100 <= code <= 599 and code not in http_codes:
                     http_codes.append(code)
+            if 'Missing host/domain in URI' in line:
+                hints.append("Detected malformed link(s) 'https:///...' causing 'Missing host/domain in URI' messages – usually harmless but indicates broken absolute URLs in source HTML. You can ignore them, fix upstream HTML, or supply a reject regex (Extra wget2 Args) to skip.")
         # Exit code mapping (mirror of core hints but GUI-focused)
         if exit_code is not None:
             if exit_code==8:

@@ -993,6 +993,9 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
             port_errs=[l for l in last_lines if 'Port number must be in the range' in l]
             if len(port_errs)>=3:
                 _invoke(cb,'log',"[hint] Repeated 'Port number must be in the range 1..65535' messages – possible malformed URL or redirect adding invalid port. Try --print-repro, verify URL, maybe --max-redirect=0.")
+            missing_host=[l for l in last_lines if 'Missing host/domain in URI' in l]
+            if len(missing_host)>=2:
+                _invoke(cb,'log',"[hint] Repeated 'Missing host/domain in URI' lines – source HTML likely contains malformed absolute links like 'https:///'. These can safely be ignored or filtered. Consider: (a) verify start URL uses correct scheme (try https:// explicitly), (b) inspect downloaded HTML for 'https:///' patterns, (c) add a reject regex via Extra wget args to skip them (e.g. --reject-regex '^https:///').")
         if http_codes:
             _invoke(cb,'log',f"[wget2] observed HTTP status codes: {', '.join(str(c) for c in http_codes[:12])}")
             if 403 in http_codes: _invoke(cb,'log','[hint] HTTP 403 – set realistic User-Agent or supply cookies/auth.')
