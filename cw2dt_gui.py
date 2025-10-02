@@ -146,6 +146,7 @@ class DockerClonerGUI(QWidget):
         self.spin_dom_stable_timeout=QSpinBox(); self.spin_dom_stable_timeout.setRange(500,30000); self.spin_dom_stable_timeout.setValue(4000)
         self.spin_dom_stable_timeout.setToolTip('Maximum additional wait attempting DOM stability per page.')
         self.chk_capture_api=QCheckBox('Capture API JSON')
+        self.chk_capture_graphql=QCheckBox('Capture GraphQL')
         self.hook_in=QLineEdit()
         hr=QHBoxLayout(); hr.addWidget(QLabel('Hook Script:')); hr.addWidget(self.hook_in); hb=QPushButton('...'); hr.addWidget(hb); hb.clicked.connect(lambda: self._pick_file(self.hook_in))
         dyn.addWidget(self.chk_prerender)
@@ -154,6 +155,7 @@ class DockerClonerGUI(QWidget):
         dyn.addWidget(QLabel('Dom Stable (ms):')); dyn.addWidget(self.spin_dom_stable)
         dyn.addWidget(QLabel('Stable Timeout (ms):')); dyn.addWidget(self.spin_dom_stable_timeout)
         dyn.addWidget(self.chk_capture_api)
+        dyn.addWidget(self.chk_capture_graphql)
         dyn.addLayout(hr)
         config_v.addWidget(dyn)
         # Router
@@ -437,7 +439,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'open_browser': self.chk_open_browser.isChecked(), 'incremental': self.chk_incremental.isChecked(), 'diff': self.chk_diff.isChecked(),
             'estimate_first': self.chk_estimate_first.isChecked(), 'cleanup': self.chk_cleanup.isChecked(),
             'prerender': self.chk_prerender.isChecked(), 'prerender_max_pages': self.spin_prer_pages.value(), 'capture_api': self.chk_capture_api.isChecked(), 'hook_script': self.hook_in.text().strip(),
-            'prerender_scroll': self.spin_prer_scroll.value(),
+            'prerender_scroll': self.spin_prer_scroll.value(), 'capture_graphql': self.chk_capture_graphql.isChecked(),
             'dom_stable_ms': self.spin_dom_stable.value(), 'dom_stable_timeout_ms': self.spin_dom_stable_timeout.value(),
             'router_intercept': self.chk_router.isChecked(), 'router_include_hash': self.chk_route_hash.isChecked(), 'router_quiet': self.chk_router_quiet.isChecked(),
             'router_max_routes': self.spin_router_max.value(), 'router_settle_ms': self.spin_router_settle.value(), 'router_wait_selector': self.router_wait_sel.text().strip(),
@@ -472,6 +474,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             try: self.spin_dom_stable_timeout.setValue(int(data.get('dom_stable_timeout_ms',4000)))
             except Exception: pass
             self.chk_capture_api.setChecked(bool(data.get('capture_api')))
+            self.chk_capture_graphql.setChecked(bool(data.get('capture_graphql')))
             self.hook_in.setText(data.get('hook_script',''))
             self.chk_router.setChecked(bool(data.get('router_intercept')))
             self.chk_route_hash.setChecked(bool(data.get('router_include_hash')))
@@ -696,6 +699,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             auth_user=self.auth_user.text().strip() or None, auth_pass=self.auth_pass.text().strip() or None,
             cookies_file=self.cookies_file.text().strip() or None, import_browser_cookies=self.chk_import_browser_cookies.isChecked(), disable_js=self.chk_disable_js.isChecked(),
             prerender=self.chk_prerender.isChecked(), prerender_max_pages=self.spin_prer_pages.value(), capture_api=self.chk_capture_api.isChecked(), hook_script=self.hook_in.text().strip() or None, prerender_scroll=self.spin_prer_scroll.value(),
+            capture_graphql=self.chk_capture_graphql.isChecked(),
             dom_stable_ms=self.spin_dom_stable.value(), dom_stable_timeout_ms=self.spin_dom_stable_timeout.value(),
             rewrite_urls=True, router_intercept=self.chk_router.isChecked(), router_include_hash=self.chk_route_hash.isChecked(), router_max_routes=self.spin_router_max.value(), router_settle_ms=self.spin_router_settle.value(), router_wait_selector=self.router_wait_sel.text().strip() or None,
             router_allow=[p.strip() for p in self.router_allow.text().split(',') if p.strip()] or None, router_deny=[p.strip() for p in self.router_deny.text().split(',') if p.strip()] or None, router_quiet=self.chk_router_quiet.isChecked(),

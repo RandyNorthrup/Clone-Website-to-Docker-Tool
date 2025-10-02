@@ -295,6 +295,7 @@ When `--prerender` (or the GUI checkbox) is enabled:
 9. Unless `--no-url-rewrite` is specified, absolute occurrences of the origin (`https://host`) are rewritten to relative paths for better relocatability inside containers or alternate domains.
 10. The prerender queue stops when either the page limit is reached or there are no more same‑origin links/routes to process.
 11. (Optional) If `--dom-stable-ms N` is supplied, a lightweight MutationObserver heuristic waits until there has been a quiet window of N milliseconds with no DOM mutations (or the `--dom-stable-timeout-ms` is reached) before snapshotting each page. This helps avoid capturing intermediate loading states in JS-heavy apps.
+12. (Optional) If `--capture-graphql` is enabled, GraphQL POST operations are persisted to `_graphql/` as `<operation>-<n>.graphql.json` containing operation name, query, variables, and JSON response.
 
 ### Live Metrics
 
@@ -326,6 +327,7 @@ Flags:
 - `--router-deny PAT1,PAT2` — discard routes matching any regex pattern (applied after allow)
 - `--dom-stable-ms N` — require N ms of no DOM mutations before capturing (heuristic stabilization)
 - `--dom-stable-timeout-ms M` — maximum additional wait attempting stability per page (default 4000)
+- `--capture-graphql` — capture GraphQL operation requests & responses into `_graphql/`
 
 GUI exposes: Router intercept, Include #hash, Max routes, Settle (ms), and Wait selector.
 

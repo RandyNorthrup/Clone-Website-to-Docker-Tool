@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.
@@ -403,6 +403,7 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                    scroll_passes: int = 0,  # new: number of incremental scrolls per page to trigger lazy load
                    dom_stable_ms: int = 0,  # new: quiet DOM mutation window required before snapshot (0 disables)
                    dom_stable_timeout_ms: int = 4000,  # new: max additional wait for stability
+                   capture_graphql: bool = False,
                    capture_storage: bool = False,
                    capture_api_types: list[str] | None = None,
                    capture_api_binary: bool = False,
@@ -444,6 +445,8 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
     import re
     visited = set(); to_visit=[start_url]; router_seen=set()
     api_dir = os.path.join(output_folder, '_api') if capture_api else None
+    gql_dir = os.path.join(output_folder, '_graphql') if capture_graphql else None
+    if gql_dir: os.makedirs(gql_dir, exist_ok=True)
     if api_dir: os.makedirs(api_dir, exist_ok=True)
     try:
         origin_parts = urlparse(start_url)
@@ -465,6 +468,7 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
         context = browser.new_context()
         captured=[]
         storage_snapshots=0
+        graphql_captured=[]
         capture_types = [c.strip().lower() for c in (capture_api_types or ['application/json']) if c.strip()]
         # Map of common content-types to extension (fallback logic inside response handler)
         ct_ext_map = {
@@ -476,50 +480,86 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             'application/graphql': '.graphql',
         }
         binary_prefixes = ('application/octet-stream','application/pdf','image/','video/','audio/')
-        if capture_api:
+        if capture_api or capture_graphql:
             def on_response(resp):  # pragma: no cover - network heavy
                 try:
                     ct = (resp.headers.get('content-type','') or '').split(';')[0].lower()
                     urlp = urlparse(resp.url)
                     # Decide if we capture
                     should_capture=False; is_binary=False
-                    if any(ct.startswith(t) for t in capture_types):
-                        should_capture=True
-                    elif capture_api_binary and any(ct.startswith(b) for b in binary_prefixes):
-                        should_capture=True; is_binary=True
-                    if not should_capture:
-                        return
-                    path = (urlp.path or '/')
-                    if path.endswith('/'):
-                        # choose index + ext depending on type
-                        ext = ct_ext_map.get(ct, '.bin' if is_binary else '.txt')
-                        path += 'index'+ext
-                    # add extension if missing
-                    if not os.path.splitext(path)[1]:
-                        ext = ct_ext_map.get(ct, '.bin' if is_binary else '.txt')
-                        path += ext
-                    dest = os.path.join(api_dir, path.lstrip('/')) if api_dir else None
-                    if not dest:
-                        return
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    if is_binary:
-                        # binary save raw body
+                    # GraphQL detection (POST, JSON body containing 'query')
+                    is_graphql=False
+                    if capture_graphql and resp.request and resp.request.method == 'POST' and ct.startswith('application/json'):
                         try:
-                            body = resp.body()
-                            with open(dest,'wb') as f: f.write(body)
+                            body_txt = resp.request.post_data() or ''
+                            if '"query"' in body_txt or '\nquery ' in body_txt or '\nmutation ' in body_txt:
+                                is_graphql=True
                         except Exception:
+                            pass
+                    if not is_graphql:
+                        if capture_api and any(ct.startswith(t) for t in capture_types):
+                            should_capture=True
+                        elif capture_api and capture_api_binary and any(ct.startswith(b) for b in binary_prefixes):
+                            should_capture=True; is_binary=True
+                        if not should_capture:
                             return
+                        path = (urlp.path or '/')
+                        if path.endswith('/'):
+                            ext = ct_ext_map.get(ct, '.bin' if is_binary else '.txt')
+                            path += 'index'+ext
+                        if not os.path.splitext(path)[1]:
+                            ext = ct_ext_map.get(ct, '.bin' if is_binary else '.txt')
+                            path += ext
+                        dest = os.path.join(api_dir, path.lstrip('/')) if api_dir else None
+                        if not dest:
+                            return
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        if is_binary:
+                            try:
+                                body = resp.body()
+                                with open(dest,'wb') as f: f.write(body)
+                            except Exception:
+                                return
+                        else:
+                            try:
+                                txt = resp.text()
+                            except Exception:
+                                return
+                            with open(dest,'w',encoding='utf-8',errors='replace') as f: f.write(txt)
+                        captured.append(path)
+                        if api_capture_cb:
+                            try: api_capture_cb(len(captured))
+                            except Exception: pass
                     else:
-                        # text path
+                        # GraphQL capture path
                         try:
-                            txt = resp.text()
+                            op_name=None; query_text=None; variables=None
+                            body_json=None
+                            try:
+                                body_json=json.loads(resp.request.post_data() or '{}')
+                            except Exception:
+                                body_json=None
+                            if isinstance(body_json, dict):
+                                op_name=body_json.get('operationName')
+                                query_text=body_json.get('query')
+                                variables=body_json.get('variables')
+                            # response text
+                            resp_json=None; resp_text=None
+                            try:
+                                resp_text=resp.text()
+                                resp_json=json.loads(resp_text)
+                            except Exception:
+                                pass
+                            fname_parts=[op_name or 'graphql', str(len(graphql_captured)+1)]
+                            safe_name='-'.join([re.sub(r'[^a-zA-Z0-9_.-]+','_',p) for p in fname_parts if p])
+                            dest=os.path.join(gql_dir, safe_name + '.graphql.json') if gql_dir else None
+                            if dest:
+                                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                                with open(dest,'w',encoding='utf-8') as f:
+                                    json.dump({'url':resp.url,'status':resp.status,'operationName':op_name,'query':query_text,'variables':variables,'response':resp_json if isinstance(resp_json,(dict,list)) else resp_text}, f, indent=2)
+                                graphql_captured.append(dest)
                         except Exception:
-                            return
-                        with open(dest,'w',encoding='utf-8',errors='replace') as f: f.write(txt)
-                    captured.append(path)
-                    if api_capture_cb:
-                        try: api_capture_cb(len(captured))
-                        except Exception: pass
+                            pass
                 except Exception:
                     pass
             context.on('response', on_response)
@@ -685,7 +725,8 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
         'storage_captured': storage_snapshots if capture_storage else 0,
         'scroll_passes': int(scroll_passes) if scroll_passes else 0,
         'dom_stable_pages': dom_stable_pages if dom_stable_ms else 0,
-        'dom_stable_total_wait_ms': dom_stable_total_wait_ms if dom_stable_ms else 0
+        'dom_stable_total_wait_ms': dom_stable_total_wait_ms if dom_stable_ms else 0,
+        'graphql_captured': len(graphql_captured) if capture_graphql else 0
     }
     if progress_percent_cb:
         try: progress_percent_cb(100)
@@ -720,6 +761,7 @@ class CloneConfig:
     capture_api_types: Optional[List[str]] = None  # list of content-type prefixes (defaults to application/json)
     capture_api_binary: bool = False  # capture selected binary types (pdf, images, etc.)
     capture_storage: bool = False  # capture localStorage/sessionStorage per prerendered page
+    capture_graphql: bool = False  # capture GraphQL request/response pairs into _graphql/
     hook_script: Optional[str] = None
     rewrite_urls: bool = True
     # router
@@ -912,6 +954,8 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
                 cmd.append(f"--capture-api-types={'/'.join(cfg.capture_api_types)}")
             if getattr(cfg,'capture_api_binary',False):
                 cmd.append("--capture-api-binary")
+        if getattr(cfg,'capture_graphql',False):
+            cmd.append("--capture-graphql")
         if getattr(cfg,'capture_storage',False):
             cmd.append("--capture-storage")
         if not cfg.rewrite_urls:
@@ -1238,6 +1282,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 scroll_passes=getattr(cfg,'prerender_scroll',0),
                 dom_stable_ms=getattr(cfg,'dom_stable_ms',0),
                 dom_stable_timeout_ms=getattr(cfg,'dom_stable_timeout_ms',4000),
+                capture_graphql=cfg.capture_graphql,
                 capture_storage=cfg.capture_storage,
                 capture_api_types=cfg.capture_api_types,
                 capture_api_binary=cfg.capture_api_binary,
@@ -1511,6 +1556,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 'capture_api_types': cfg.capture_api_types if (cfg.prerender and cfg.capture_api) else None,
                 'capture_api_binary': bool(cfg.capture_api_binary) if (cfg.prerender and cfg.capture_api) else False,
                 'capture_storage': bool(cfg.capture_storage) if cfg.prerender else False,
+                'capture_graphql': bool(cfg.capture_graphql) if cfg.prerender else False,
                 'checksums_included':cfg.checksums,
                 'checksums': cfg.checksums,  # alias for legacy naming
                 'checksum_extra_extensions':extra,
@@ -1544,6 +1590,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     manifest['router_routes']=int(prer_stats.get('routes_discovered',0))
                 if 'storage_captured' in prer_stats:
                     manifest['storage_captured_count']=int(prer_stats.get('storage_captured',0))
+                if 'graphql_captured' in prer_stats:
+                    manifest['graphql_captured_count']=int(prer_stats.get('graphql_captured',0))
             # environment metadata
             try:
                 import platform, sys as _sys
@@ -1893,6 +1941,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--capture-api-types', default=None, help='Slash- or comma-separated list of content-type prefixes to capture (e.g. application/json,text/csv)')
     parser.add_argument('--capture-api-binary', action='store_true', help='Also capture common binary types (pdf, images, octet-stream)')
     parser.add_argument('--capture-storage', action='store_true', help='Capture localStorage/sessionStorage snapshots during prerender')
+    parser.add_argument('--capture-graphql', action='store_true', help='Capture GraphQL request/response pairs during prerender into _graphql/')
     parser.add_argument('--hook-script', default=None, help='Path to Python script exposing on_page(page,url,context)')
     parser.add_argument('--no-url-rewrite', action='store_true', help='Disable rewriting absolute origin URLs to relative')
     parser.add_argument('--router-intercept', action='store_true', help='Intercept SPA router (history API)')
@@ -1953,10 +2002,10 @@ def headless_main(argv: list[str]) -> int:
         url=args.url, dest=args.dest, docker_name=args.docker_name, build=args.build, jobs=args.jobs,
         bind_ip=args.bind_ip, host_port=args.host_port, container_port=args.container_port, size_cap=args.size_cap,
     throttle=args.throttle, auth_user=args.auth_user, auth_pass=args.auth_pass, cookies_file=args.cookies_file, import_browser_cookies=args.import_browser_cookies, disable_js=args.disable_js,
-        prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, prerender_scroll=args.prerender_scroll, capture_api=args.capture_api,
+    prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, prerender_scroll=args.prerender_scroll, capture_api=args.capture_api,
     dom_stable_ms=args.dom_stable_ms, dom_stable_timeout_ms=args.dom_stable_timeout_ms,
         capture_api_types=_cap_types, capture_api_binary=args.capture_api_binary,
-        capture_storage=args.capture_storage,
+    capture_storage=args.capture_storage, capture_graphql=args.capture_graphql,
         hook_script=args.hook_script, rewrite_urls=(not args.no_url_rewrite), router_intercept=args.router_intercept,
         router_include_hash=args.router_include_hash, router_max_routes=args.router_max_routes,
         router_settle_ms=args.router_settle_ms, router_wait_selector=args.router_wait_selector,

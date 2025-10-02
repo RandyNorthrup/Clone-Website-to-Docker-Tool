@@ -1,4 +1,21 @@
 # Changelog
+
+All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
+
+## [1.1.6] - 2025-10-01
+
+### Added (GraphQL Capture)
+
+- `--capture-graphql` flag + GUI integration forthcoming (CLI first) to persist GraphQL POST operations during prerender under `_graphql/` as JSON bundles containing operation name, query text, variables, HTTP status, and parsed response payload.
+- Manifest additions: `capture_graphql` boolean and `graphql_captured_count` (promoted from prerender stats).
+- Reproduction command includes `--capture-graphql` when active.
+
+### Notes (GraphQL)
+
+- Detection heuristic: POST + `application/json` content-type whose request body contains `"query"` or newline-prefixed `query` / `mutation` tokens.
+- Batched GraphQL arrays are not yet decomposed—each request saved as-is (future enhancement: split batches per operation).
+- Combine with `--dom-stable-ms` for more deterministic snapshots of data-driven UIs.
+
 ## [1.1.5] - 2025-10-01
 
 ### Added (DOM Stabilization Heuristic)
@@ -14,8 +31,6 @@
 - If the timeout is hit without a quiet window, the current DOM is captured (best-effort mode).
 - Complements `--prerender-scroll`; combine scroll passes followed by stabilization to allow lazy content to load then settle.
 
-
-All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
 
 ## [1.1.3] - 2025-10-01
 
