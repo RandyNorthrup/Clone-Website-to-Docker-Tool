@@ -234,11 +234,18 @@ class DockerClonerGUI(QWidget):
         row2=QHBoxLayout(); row2.setSpacing(6)
         self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
         self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); row2.addWidget(self.btn_serve)
+        self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
         self.btn_deps=QPushButton('Dependencies'); row2.addWidget(self.btn_deps)
         self.btn_save_cfg=QPushButton('Save Config'); row2.addWidget(self.btn_save_cfg)
         self.btn_load_cfg=QPushButton('Load Config'); row2.addWidget(self.btn_load_cfg)
         row2.addStretch(1)
         rv.addLayout(row1); rv.addLayout(row2)
+        # Row 3: URL convenience actions
+        row3=QHBoxLayout(); row3.setSpacing(6)
+        self.btn_copy_addr=QPushButton('Copy Address'); self.btn_copy_addr.setEnabled(False); row3.addWidget(self.btn_copy_addr)
+        self.btn_open_addr=QPushButton('Open in Browser'); self.btn_open_addr.setEnabled(False); row3.addWidget(self.btn_open_addr)
+        row3.addStretch(1)
+        rv.addLayout(row3)
         self.prog=QProgressBar(); self.prog.setRange(0,100); rv.addWidget(self.prog)
         # Lightweight dependency banner (hidden unless something missing)
         from PySide6.QtWidgets import QFrame
@@ -256,6 +263,9 @@ class DockerClonerGUI(QWidget):
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self.btn_wizard.clicked.connect(self._run_wizard)
+        self.btn_build_now.clicked.connect(self._build_now)
+        self.btn_copy_addr.clicked.connect(self._copy_address)
+        self.btn_open_addr.clicked.connect(self._open_address)
         # Dynamic interlocks
         self.chk_prerender.toggled.connect(self._on_prerender_toggled)
         for cap in (self.chk_capture_api,self.chk_capture_api_binary,self.chk_capture_graphql,self.chk_capture_storage):
@@ -361,6 +371,9 @@ class DockerClonerGUI(QWidget):
             'btn_deps':"Show installed / missing optional dependencies with install hints (commands copied to clipboard).",
             'btn_save_cfg':"Save current settings as a reusable profile (stored in ~/.cw2dt_profiles).",
             'btn_load_cfg':"Load a previously saved profile and apply its settings.",
+            'btn_build_now':"Manually build (or rebuild) the Docker image using the last successful clone output. Existing image is re-tagged with :prev-<timestamp> if present.",
+            'btn_copy_addr':"Copy the expected site URL (http://<bind_ip or localhost>:<host_port>) to clipboard (enabled after run or serve).",
+            'btn_open_addr':"Open the expected site URL in your default browser (container or serve must be running to respond).",
             'btn_sections_toggle':"Expand or collapse all configuration sections (toggles state).",
             'btn_reset_defaults':"Reset all configuration fields to their initial defaults (does not clear recent URL history).",
             'console':"Log output, progress messages, structured event summaries, and diagnostics.",
@@ -1004,6 +1017,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                 self.btn_run_docker.setEnabled(False)
                 self._on_log('[hint] Docker image not built (Build Docker image was unchecked or build failed). Enable the checkbox and re-run to build, or run a manual docker build in the output folder.')
             self.btn_serve.setEnabled(True)
+            self.btn_build_now.setEnabled(True)
+            self._update_url_action_buttons()
         else:
             self.status_lbl.setText('Clone FAILED')
         if result and getattr(result,'output_folder',None): self.console.append(f"Output: {result.output_folder}")
@@ -1058,6 +1073,69 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         self._paused=not self._paused
         self.btn_pause.setText('Resume' if self._paused else 'Pause')
         self._on_log('[gui] paused' if self._paused else '[gui] resumed')
+    # -------- Build Now (manual Docker build after clone) --------
+    def _build_now(self):
+        if not self._last_result or not getattr(self._last_result,'success',False):
+            QMessageBox.information(self,'Build','Successful clone required before manual build.'); return
+        if not docker_available():
+            QMessageBox.warning(self,'Docker','Docker not available.'); return
+        out=self._last_result.output_folder
+        name=self.name_in.text().strip() or 'site'
+        # Re-tag existing image for safety
+        if image_exists_locally(name):
+            import datetime, subprocess
+            prev_tag=f"{name}:prev-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+            try:
+                subprocess.run(['docker','tag',name,prev_tag],capture_output=True)
+                self._on_log(f"[docker] existing image re-tagged as {prev_tag}")
+            except Exception as e:
+                self._on_log(f"[docker] re-tag failed: {e}")
+        self._on_log(f"[docker] building image {name} (manual Build Now)")
+        try:
+            import subprocess
+            proc=subprocess.Popen(['docker','build','-t',name,out],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+            for line in proc.stdout or []:
+                self._on_log(line.rstrip())
+            proc.wait()
+            if proc.returncode==0:
+                self._on_log('[docker] build succeeded')
+                try: setattr(self._last_result,'docker_built',True)
+                except Exception: pass
+                self.btn_run_docker.setEnabled(True)
+                self._update_url_action_buttons()
+            else:
+                self._on_log(f"[docker] build failed (exit {proc.returncode})")
+        except Exception as e:
+            self._on_log(f"[docker] build error: {e}")
+    # -------- URL helpers --------
+    def _compose_url(self):
+        ip=self.ip_in.text().strip() or '127.0.0.1'
+        host='localhost' if ip=='0.0.0.0' else ip
+        return f"http://{host}:{self.host_port.value()}"
+    def _update_url_action_buttons(self, container_started: bool=False):
+        enabled=bool(self._last_result and getattr(self._last_result,'success',False))
+        if enabled and (container_started or self.btn_serve.text()=='Stop Serve' or image_exists_locally(self.name_in.text().strip() or 'site')):
+            self.btn_copy_addr.setEnabled(True)
+            self.btn_open_addr.setEnabled(True)
+        else:
+            self.btn_copy_addr.setEnabled(False)
+            self.btn_open_addr.setEnabled(False)
+    def _copy_address(self):
+        if not self.btn_copy_addr.isEnabled(): return
+        url=self._compose_url()
+        try:
+            QApplication.clipboard().setText(url)
+            self._on_log(f"[gui] copied {url}")
+        except Exception:
+            self._on_log('[gui] copy failed')
+    def _open_address(self):
+        if not self.btn_open_addr.isEnabled(): return
+        url=self._compose_url()
+        try:
+            webbrowser.open(url)
+            self._on_log(f"[gui] opened {url}")
+        except Exception as e:
+            self._on_log(f"[gui] open failed: {e}")
     def _run_docker_image(self):
         if not self._last_result or not getattr(self._last_result,'success',False): return
         name=self.name_in.text().strip() or 'site'
@@ -1072,6 +1150,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             cmd=['docker','run','-d','-p',f"{self.host_port.value()}:{self.cont_port.value()}",name]
             self._on_log('[gui] running docker: '+' '.join(cmd))
             subprocess.Popen(cmd)
+            self._update_url_action_buttons(True)
         except Exception as e:
             self._on_log(f'[gui] docker run failed: {e}')
     def _serve_folder(self):
@@ -1117,7 +1196,13 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
     def _set_running(self,running:bool):
         self.btn_clone.setEnabled(not running); self.btn_cancel.setEnabled(running); self.btn_estimate.setEnabled(not running); self.btn_pause.setEnabled(running)
         for w in (self.chk_build,self.chk_run_built,self.chk_serve,self.chk_open_browser,self.chk_prerender): w.setEnabled(not running)
-        if running: self.btn_run_docker.setEnabled(False); self.btn_serve.setEnabled(False)
+        if running:
+            self.btn_run_docker.setEnabled(False); self.btn_serve.setEnabled(False); self.btn_build_now.setEnabled(False)
+            if hasattr(self,'btn_copy_addr'): self.btn_copy_addr.setEnabled(False)
+            if hasattr(self,'btn_open_addr'): self.btn_open_addr.setEnabled(False)
+        else:
+            if self._last_result and getattr(self._last_result,'success',False):
+                self.btn_build_now.setEnabled(True)
 
     def _compute_and_lock_min_size(self):
         # Expand all to measure widest required width

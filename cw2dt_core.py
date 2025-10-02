@@ -9,7 +9,7 @@ objects and functions defined here. Backwards compatibility for the
 modular split starts at version 1.0.1.
 """
 from __future__ import annotations
-import os, sys, subprocess, shutil, platform, socket, importlib, importlib.util, time, hashlib, json, webbrowser, uuid, re
+import os, sys, subprocess, shutil, platform, socket, importlib, importlib.util, time, hashlib, json, webbrowser, uuid, re, asyncio
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Tuple, Dict
@@ -778,6 +778,76 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
         try: progress_percent_cb(100)
         except Exception: pass
 
+# --- prerender isolation fallback (subprocess) ---
+def _run_prerender_isolated(*, start_url: str, site_root: str, output_folder: str, max_pages: int,
+                            capture_api: bool, hook_script: str | None, scroll_passes: int,
+                            dom_stable_ms: int, dom_stable_timeout_ms: int, capture_graphql: bool,
+                            capture_storage: bool, capture_api_types, capture_api_binary: bool,
+                            rewrite_urls: bool, router_intercept: bool, router_include_hash: bool,
+                            router_max_routes: int, router_settle_ms: int, router_wait_selector: str | None,
+                            router_allow, router_deny, router_quiet: bool) -> dict:
+    """Run prerender in an isolated Python process to avoid polluted/closed event loop state.
+    Returns stats dict (possibly with _playwright_missing) or {'_playwright_missing':True,'error':...} on failure.
+    """
+    import multiprocessing, io, contextlib, traceback, json as _json, sys, time as _time
+    q: 'multiprocessing.Queue' = multiprocessing.Queue()  # type: ignore
+    kwargs = dict(start_url=start_url, site_root=site_root, output_folder=output_folder, max_pages=max_pages,
+                  capture_api=capture_api, hook_script=hook_script, scroll_passes=scroll_passes,
+                  dom_stable_ms=dom_stable_ms, dom_stable_timeout_ms=dom_stable_timeout_ms,
+                  capture_graphql=capture_graphql, capture_storage=capture_storage,
+                  capture_api_types=capture_api_types, capture_api_binary=capture_api_binary,
+                  rewrite_urls=rewrite_urls, router_intercept=router_intercept, router_include_hash=router_include_hash,
+                  router_max_routes=router_max_routes, router_settle_ms=router_settle_ms,
+                  router_wait_selector=router_wait_selector, router_allow=router_allow, router_deny=router_deny,
+                  router_quiet=router_quiet)
+    def _child(queue, kw):  # pragma: no cover - subprocess
+        buf = io.StringIO()
+        import cw2dt_core
+        with contextlib.redirect_stdout(buf):
+            try:
+                res = cw2dt_core._run_prerender(**kw)
+                queue.put(('ok', res, buf.getvalue()))
+            except Exception as e:  # broad by design - send traceback
+                queue.put(('err', {'error': str(e), 'trace': traceback.format_exc()}, buf.getvalue()))
+    proc = multiprocessing.Process(target=_child, args=(q, kwargs), daemon=True)
+    proc.start()
+    timeout = min(max_pages * 10, 480)  # heuristic: 10s per page, cap 8m
+    start = _time.time()
+    result = None
+    while ( _time.time() - start ) < timeout:
+        try:
+            if not q.empty():
+                result = q.get_nowait()
+                break
+        except Exception:
+            break
+        if not proc.is_alive():
+            # process died unexpectedly; attempt to drain queue once
+            try:
+                if not q.empty():
+                    result = q.get_nowait()
+            except Exception:
+                pass
+            break
+        _time.sleep(0.15)
+    if proc.is_alive():
+        try: proc.terminate()
+        except Exception: pass
+    if isinstance(result, tuple) and result and result[0] == 'ok':
+        status, stats, logs = result
+        # Attach limited log lines for parent side logging
+        trimmed_logs = []
+        for line in logs.splitlines():
+            if line.strip(): trimmed_logs.append(line.rstrip())
+            if len(trimmed_logs) >= 150: break
+        return {**stats, '_isolated': True, '_isolated_logs': trimmed_logs}
+    elif isinstance(result, tuple) and result and result[0] == 'err':
+        _, info, logs = result
+        trimmed_logs = [l.rstrip() for l in logs.splitlines()[-50:]] if logs else []
+        return {'_playwright_missing': True, 'error': info.get('error'), 'trace': info.get('trace'), '_isolated': True, '_isolated_logs': trimmed_logs}
+    else:
+        return {'_playwright_missing': True, 'error': 'isolation_timeout_or_crash', '_isolated': True}
+
 # ======================= New Modular Clone Pipeline ========================
 
 @dataclass
@@ -977,6 +1047,7 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
                     if (rate!=last_rate) and (now-last_rate_time)>0.25:
                         last_rate=rate; last_rate_time=now; _invoke(cb,'bandwidth',rate)
     proc.wait()
+    malformed_host_count = len([l for l in last_lines if 'Missing host/domain in URI' in l])
     if proc.returncode!=0:
         hints={1:'Generic error (check URL / network).',2:'Parse error / usage problem.',3:'File I/O error.',4:'Network failure.',5:'SSL/TLS verification failure.',6:'Authentication failure.',7:'Protocol error.',8:'Server error response (4xx/5xx).'}
         hint=hints.get(proc.returncode,'See wget2 docs for exit code details.')
@@ -1005,6 +1076,8 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
             missing_host=[l for l in last_lines if 'Missing host/domain in URI' in l]
             if len(missing_host)>=2:
                 _invoke(cb,'log',"[hint] Repeated 'Missing host/domain in URI' lines – source HTML likely contains malformed absolute links like 'https:///'. These can safely be ignored or filtered. Consider: (a) verify start URL uses correct scheme (try https:// explicitly), (b) inspect downloaded HTML for 'https:///' patterns, (c) add a reject regex via Extra wget args to skip them (e.g. --reject-regex '^https:///').")
+        if malformed_host_count:
+            _invoke(cb,'log',f"[wget2] malformed_host_domain_lines={malformed_host_count}")
         if http_codes:
             _invoke(cb,'log',f"[wget2] observed HTTP status codes: {', '.join(str(c) for c in http_codes[:12])}")
             if 403 in http_codes: _invoke(cb,'log','[hint] HTTP 403 – set realistic User-Agent or supply cookies/auth.')
@@ -1459,68 +1532,151 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
     # Prerender
     t_prer_start=None; t_prer_end=None; prer_stats=None
     if cfg.prerender:
-        if _canceled('prerender'):  # cancellation before starting prerender
+        # Lightweight preflight to detect closed event loop
+        try:
+            loop=asyncio.get_event_loop_policy().get_event_loop()
+            if getattr(loop,'is_closed',None) and loop.is_closed():
+                log('[prerender] preflight detected closed event loop; skipping prerender')
+                cfg.prerender=False
+        except Exception:
+            pass
+    if cfg.prerender:
+        if _canceled('prerender'):
             j('summary', success=False, canceled=True)
             return CloneResult(False, False, output_folder, output_folder, None, None, {})
-        log(f"[prerender] starting (max {cfg.prerender_max_pages})")
-        _invoke(callbacks, 'phase', 'prerender', 0)
-        j('phase_start', phase='prerender', max_pages=cfg.prerender_max_pages)
-        try:
-            # Deterministic hook invocation when Playwright is force-disabled (env flag) so tests can rely on side-effects
-            if os.environ.get('CW2DT_FORCE_NO_PLAYWRIGHT') and cfg.hook_script and os.path.exists(cfg.hook_script):
-                try:
-                    import runpy
-                    _mod = runpy.run_path(cfg.hook_script)
-                    _hf = _mod.get('on_page')
-                    if callable(_hf):
-                        try: _hf(None, cfg.url, None)
-                        except Exception: pass
-                except Exception:  # pragma: no cover - best effort
-                    pass
-            # Wrap progress percent callback to allow cancellation
-            def _pr_progress(pct):
-                if _canceled('prerender'):
-                    raise RuntimeError('__CANCEL_PRERENDER__')
-                _invoke(callbacks, 'phase', 'prerender', pct)
-            prer_stats = _run_prerender(
-                start_url=cfg.url,
-                site_root=site_root,
-                output_folder=output_folder,
-                max_pages=cfg.prerender_max_pages,
-                capture_api=cfg.capture_api,
-                scroll_passes=getattr(cfg,'prerender_scroll',0),
-                dom_stable_ms=getattr(cfg,'dom_stable_ms',0),
-                dom_stable_timeout_ms=getattr(cfg,'dom_stable_timeout_ms',4000),
-                capture_graphql=cfg.capture_graphql,
-                capture_storage=cfg.capture_storage,
-                capture_api_types=cfg.capture_api_types,
-                capture_api_binary=cfg.capture_api_binary,
-                hook_script=cfg.hook_script,
-                rewrite_urls=cfg.rewrite_urls,
-                api_capture_cb=lambda n: _invoke(callbacks,'api_capture',n),
-                router_intercept=cfg.router_intercept,
-                router_include_hash=cfg.router_include_hash,
-                router_max_routes=cfg.router_max_routes,
-                router_settle_ms=cfg.router_settle_ms,
-                router_wait_selector=cfg.router_wait_selector,
-                router_allow=cfg.router_allow,
-                router_deny=cfg.router_deny,
-                router_route_cb=lambda n: _invoke(callbacks,'router_count',n),
-                router_quiet=cfg.router_quiet,
-                progress_percent_cb=_pr_progress,
-                progress_cb=lambda m: _invoke(callbacks,'log',m)
-            )
-            _invoke(callbacks,'phase','prerender',100)
-            if isinstance(prer_stats, dict):
-                j('phase_end', phase='prerender', **prer_stats)
-            else:
-                j('phase_end', phase='prerender')
-        except Exception as e:
-            if isinstance(e, RuntimeError) and str(e) == '__CANCEL_PRERENDER__':
-                # Already logged canceled event
-                return CloneResult(False, False, output_folder, output_folder, None, None, {})
-            log(f"[prerender] failed: {e}")
-            j('phase_error', phase='prerender', error=str(e))
+        max_attempts=3
+        base_delay=0.75
+        attempt=0
+        log(f"[prerender] starting (max {cfg.prerender_max_pages}) with up to {max_attempts} attempts")
+        _invoke(callbacks,'phase','prerender',0)
+        j('phase_start', phase='prerender', max_pages=cfg.prerender_max_pages, attempts=max_attempts)
+        isolation_used=False
+        while attempt < max_attempts:
+            attempt +=1
+            if attempt>1:
+                log(f"[prerender] attempt {attempt}/{max_attempts}")
+            try:
+                # Deterministic hook invocation when Playwright force-disabled
+                if os.environ.get('CW2DT_FORCE_NO_PLAYWRIGHT') and cfg.hook_script and os.path.exists(cfg.hook_script):
+                    try:
+                        import runpy
+                        _mod=runpy.run_path(cfg.hook_script)
+                        _hf=_mod.get('on_page')
+                        if callable(_hf):
+                            try: _hf(None, cfg.url, None)
+                            except Exception: pass
+                    except Exception:
+                        pass
+                def _pr_progress(pct):
+                    if _canceled('prerender'):
+                        raise RuntimeError('__CANCEL_PRERENDER__')
+                    _invoke(callbacks,'phase','prerender',pct)
+                prer_stats=_run_prerender(
+                    start_url=cfg.url,
+                    site_root=site_root,
+                    output_folder=output_folder,
+                    max_pages=cfg.prerender_max_pages,
+                    capture_api=cfg.capture_api,
+                    scroll_passes=getattr(cfg,'prerender_scroll',0),
+                    dom_stable_ms=getattr(cfg,'dom_stable_ms',0),
+                    dom_stable_timeout_ms=getattr(cfg,'dom_stable_timeout_ms',4000),
+                    capture_graphql=cfg.capture_graphql,
+                    capture_storage=cfg.capture_storage,
+                    capture_api_types=cfg.capture_api_types,
+                    capture_api_binary=cfg.capture_api_binary,
+                    hook_script=cfg.hook_script,
+                    rewrite_urls=cfg.rewrite_urls,
+                    api_capture_cb=lambda n: _invoke(callbacks,'api_capture',n),
+                    router_intercept=cfg.router_intercept,
+                    router_include_hash=cfg.router_include_hash,
+                    router_max_routes=cfg.router_max_routes,
+                    router_settle_ms=cfg.router_settle_ms,
+                    router_wait_selector=cfg.router_wait_selector,
+                    router_allow=cfg.router_allow,
+                    router_deny=cfg.router_deny,
+                    router_route_cb=lambda n: _invoke(callbacks,'router_count',n),
+                    router_quiet=cfg.router_quiet,
+                    progress_percent_cb=_pr_progress,
+                    progress_cb=lambda m: _invoke(callbacks,'log',m)
+                )
+                # Success if pages processed or playwright not missing
+                recoverable=False
+                if isinstance(prer_stats,dict):
+                    if prer_stats.get('_playwright_missing') and prer_stats.get('pages_processed',0)==0:
+                        recoverable=True
+                if recoverable and attempt < max_attempts:
+                    delay=base_delay*attempt
+                    log(f"[prerender] runtime unavailable (attempt {attempt}); retrying in {delay:.2f}s ...")
+                    j('prerender_retry', attempt=attempt, reason='playwright_missing', delay=delay)
+                    time.sleep(delay)
+                    continue
+                if recoverable and attempt == max_attempts and not isolation_used:
+                    isolation_used=True
+                    log('[prerender] in-process retries exhausted; switching to isolated subprocess fallback')
+                    j('prerender_isolation', attempt=attempt, reason='playwright_missing')
+                    iso_stats=_run_prerender_isolated(
+                        start_url=cfg.url, site_root=site_root, output_folder=output_folder,
+                        max_pages=cfg.prerender_max_pages, capture_api=cfg.capture_api,
+                        hook_script=cfg.hook_script, scroll_passes=getattr(cfg,'prerender_scroll',0),
+                        dom_stable_ms=getattr(cfg,'dom_stable_ms',0), dom_stable_timeout_ms=getattr(cfg,'dom_stable_timeout_ms',4000),
+                        capture_graphql=cfg.capture_graphql, capture_storage=cfg.capture_storage,
+                        capture_api_types=cfg.capture_api_types, capture_api_binary=cfg.capture_api_binary,
+                        rewrite_urls=cfg.rewrite_urls, router_intercept=cfg.router_intercept,
+                        router_include_hash=cfg.router_include_hash, router_max_routes=cfg.router_max_routes,
+                        router_settle_ms=cfg.router_settle_ms, router_wait_selector=cfg.router_wait_selector,
+                        router_allow=cfg.router_allow, router_deny=cfg.router_deny, router_quiet=cfg.router_quiet
+                    )
+                    _invoke(callbacks,'phase','prerender',100)
+                    if isinstance(iso_stats,dict):
+                        j('phase_end', phase='prerender', attempt=attempt, isolated=True, **iso_stats)
+                    else:
+                        j('phase_end', phase='prerender', attempt=attempt, isolated=True)
+                    break
+                # Finalize
+                _invoke(callbacks,'phase','prerender',100)
+                if isinstance(prer_stats,dict):
+                    j('phase_end', phase='prerender', attempt=attempt, **prer_stats)
+                else:
+                    j('phase_end', phase='prerender', attempt=attempt)
+                break
+            except Exception as e:
+                if isinstance(e,RuntimeError) and str(e)=='__CANCEL_PRERENDER__':
+                    return CloneResult(False, False, output_folder, output_folder, None, None, {})
+                msg=str(e)
+                recoverable = ('Event loop is closed' in msg or 'Target page, context or browser has been closed' in msg)
+                if recoverable and attempt < max_attempts:
+                    delay=base_delay*attempt
+                    log(f"[prerender] attempt {attempt} failed ({msg}); retrying in {delay:.2f}s ...")
+                    j('prerender_retry', attempt=attempt, reason='event_loop_closed', delay=delay)
+                    time.sleep(delay)
+                    continue
+                if recoverable and not isolation_used:
+                    isolation_used=True
+                    log('[prerender] switching to isolated subprocess fallback due to repeated event loop closure')
+                    j('prerender_isolation', attempt=attempt, reason='event_loop_closed')
+                    iso_stats=_run_prerender_isolated(
+                        start_url=cfg.url, site_root=site_root, output_folder=output_folder,
+                        max_pages=cfg.prerender_max_pages, capture_api=cfg.capture_api,
+                        hook_script=cfg.hook_script, scroll_passes=getattr(cfg,'prerender_scroll',0),
+                        dom_stable_ms=getattr(cfg,'dom_stable_ms',0), dom_stable_timeout_ms=getattr(cfg,'dom_stable_timeout_ms',4000),
+                        capture_graphql=cfg.capture_graphql, capture_storage=cfg.capture_storage,
+                        capture_api_types=cfg.capture_api_types, capture_api_binary=cfg.capture_api_binary,
+                        rewrite_urls=cfg.rewrite_urls, router_intercept=cfg.router_intercept,
+                        router_include_hash=cfg.router_include_hash, router_max_routes=cfg.router_max_routes,
+                        router_settle_ms=cfg.router_settle_ms, router_wait_selector=cfg.router_wait_selector,
+                        router_allow=cfg.router_allow, router_deny=cfg.router_deny, router_quiet=cfg.router_quiet
+                    )
+                    _invoke(callbacks,'phase','prerender',100)
+                    if isinstance(iso_stats,dict):
+                        j('phase_end', phase='prerender', attempt=attempt, isolated=True, **iso_stats)
+                    else:
+                        j('phase_end', phase='prerender', attempt=attempt, isolated=True)
+                    break
+                else:
+                    log(f"[prerender] failed: {e}")
+                    j('phase_error', phase='prerender', error=str(e), attempt=attempt)
+                    _invoke(callbacks,'phase','prerender',100)
+                    break
         t_prer_end=time.time()
     # Strip JS if requested
     if cfg.disable_js:
@@ -1576,7 +1732,17 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
             rc=_cli_run_stream(['docker','build','-t', cfg.docker_name, output_folder])
             docker_success = (rc == 0)
             docker_built_flag = docker_success
-            if not docker_success: log('[docker] build failed')
+            if not docker_success:
+                # Try to surface last lines of build log by re-running in quiet mode capturing tail (best effort)
+                try:
+                    res=subprocess.run(['docker','build','-t', cfg.docker_name, output_folder],capture_output=True,text=True,timeout=120)
+                    tail='\n'.join((res.stdout.splitlines() if res.stdout else [])[-12:])
+                    log('[docker] build failed')
+                    if tail:
+                        for ln in tail.splitlines():
+                            log('[docker][tail] '+ln)
+                except Exception:
+                    log('[docker] build failed (no detail)')
             t_build_end=time.time()
             _invoke(callbacks,'phase','build',100)
             j('phase_end', phase='build', success=docker_success)
