@@ -931,6 +931,7 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
     # Keep a small ring buffer of recent stderr lines so we can show a tail on failure.
     from collections import deque
     last_lines: deque[str] = deque(maxlen=25)
+    http_codes: List[int] = []
     if stream is not None:
         for line in stream:
             # Cooperative cancellation
@@ -946,6 +947,21 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
                 pass
             if not line: continue
             last_lines.append(line.rstrip())
+            # Collect HTTP status codes (e.g. 'HTTP/1.1 403' or ': 404 Not Found')
+            try:
+                import re as _hre
+                for m in _hre.finditer(r'HTTP/\d\.\d\s+(\d{3})', line):
+                    code=int(m.group(1))
+                    if 100 <= code <= 599 and code not in http_codes:
+                        http_codes.append(code)
+                # fallback simple pattern
+                m2=_hre.search(r'\b(\d{3})\b', line)
+                if m2 and ('HTTP' in line or 'error' in line.lower()):
+                    code=int(m2.group(1))
+                    if 100 <= code <= 599 and code not in http_codes:
+                        http_codes.append(code)
+            except Exception:
+                pass
             # percent
             for tok in line.split():
                 if tok.endswith('%'):
@@ -1015,6 +1031,17 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
             port_errs=[l for l in last_lines if 'Port number must be in the range' in l]
             if len(port_errs) >= 3:
                 _invoke(cb,'log',"[hint] Repeated 'Port number must be in the range 1..65535' messages detected. This usually indicates malformed URLs (e.g. duplicated colon, stray : characters, or a space breaking the URL) or an upstream redirect appending an invalid port. Verify the URL exactly as wget2 sees it and consider using --print-repro to inspect the command. If the site forces an invalid Location: header, try adding --max-redirect=0 in Extra wget args and test manually.")
+        if http_codes:
+            _invoke(cb,'log', f"[wget2] observed HTTP status codes: {', '.join(str(c) for c in http_codes[:12])}")
+            # Add quick actionable hints for common problematic codes
+            if 403 in http_codes:
+                _invoke(cb,'log', '[hint] HTTP 403 detected – try a realistic User-Agent and/or provide cookies/auth.')
+            if 429 in http_codes:
+                _invoke(cb,'log', '[hint] HTTP 429 (rate limit) – lower threads and add retry args: --retry-on-http-error=429,503 --tries=3 --waitretry=2')
+            if 503 in http_codes:
+                _invoke(cb,'log', '[hint] HTTP 503 – server unavailable; reduce concurrency, add retries, possibly pause between runs.')
+            if 404 in http_codes and len(http_codes)==1:
+                _invoke(cb,'log', '[hint] Only 404 observed – verify the starting URL (trailing slash? www vs non-www?).')
         _invoke(cb, 'log', f"[error] wget2 exit code {proc.returncode} – {hint}")
         return False
     if last_pct < 100:
