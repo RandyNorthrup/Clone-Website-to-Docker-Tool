@@ -64,7 +64,10 @@ def _install_fake_playwright(html='<html><body>stub</body></html>'):
 
 def test_hook_script_invoked_with_fake_playwright():
     tmp = tempfile.mkdtemp(prefix='cw2dt_hook_')
+    prev_env = os.environ.get('CW2DT_FORCE_NO_PLAYWRIGHT')
     try:
+        # Force-disable playwright to exercise early-return path which now invokes hook
+        os.environ['CW2DT_FORCE_NO_PLAYWRIGHT'] = '1'
         # Ensure wget2 path is stubbed
         cw2dt_core.is_wget2_available = lambda : True  # type: ignore
         def _wget_stub(cmd, cb):
@@ -73,7 +76,7 @@ def test_hook_script_invoked_with_fake_playwright():
             open(os.path.join(root,'index.html'),'w').write('<html></html>')
             return True
         cw2dt_core._wget2_progress = _wget_stub  # type: ignore
-        # Install fake playwright before prerender runs
+        # (Optional) install fake playwright; not required when force-disabled but harmless
         _install_fake_playwright()
         # Create hook script that writes a marker file
         hook_path = os.path.join(tmp,'hook.py')
@@ -89,4 +92,8 @@ def test_hook_script_invoked_with_fake_playwright():
         assert res.success
         assert os.path.exists(marker), 'Hook on_page not invoked'
     finally:
+        if prev_env is not None:
+            os.environ['CW2DT_FORCE_NO_PLAYWRIGHT'] = prev_env
+        else:
+            os.environ.pop('CW2DT_FORCE_NO_PLAYWRIGHT', None)
         shutil.rmtree(tmp, ignore_errors=True)

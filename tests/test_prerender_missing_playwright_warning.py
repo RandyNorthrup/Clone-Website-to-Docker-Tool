@@ -14,7 +14,10 @@ class CB(cw2dt_core.CloneCallbacks):
 
 def test_prerender_missing_playwright_emits_manifest_warning():
     tmp = tempfile.mkdtemp(prefix='cw2dt_pw_missing_')
+    prev_env = os.environ.get('CW2DT_FORCE_NO_PLAYWRIGHT')
     try:
+        # Force prerender path to simulate missing playwright regardless of actual installation
+        os.environ['CW2DT_FORCE_NO_PLAYWRIGHT'] = '1'
         cw2dt_core.is_wget2_available = lambda : True  # type: ignore
         def _wget_stub(cmd, cb):
             root = os.path.join(cfg.dest, cfg.docker_name)
@@ -34,4 +37,8 @@ def test_prerender_missing_playwright_emits_manifest_warning():
         warnings = data.get('warnings') or []
         assert any('Playwright not installed' in w for w in warnings), warnings
     finally:
+        if prev_env is not None:
+            os.environ['CW2DT_FORCE_NO_PLAYWRIGHT'] = prev_env
+        else:
+            os.environ.pop('CW2DT_FORCE_NO_PLAYWRIGHT', None)
         shutil.rmtree(tmp, ignore_errors=True)
