@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.
@@ -400,6 +400,8 @@ def parse_rate_to_bps(text: str) -> int | None: return parse_size_to_bytes(text)
 # --- prerender (optional) ---
 def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages: int = 40,
                    capture_api: bool = False, hook_script: str | None = None,
+                   capture_api_types: list[str] | None = None,
+                   capture_api_binary: bool = False,
                    rewrite_urls: bool = True, progress_cb=None, progress_percent_cb=None,
                    api_capture_cb=None,
                    router_intercept: bool = False, router_include_hash: bool = False,
@@ -456,23 +458,61 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         captured=[]
+        capture_types = [c.strip().lower() for c in (capture_api_types or ['application/json']) if c.strip()]
+        # Map of common content-types to extension (fallback logic inside response handler)
+        ct_ext_map = {
+            'application/json': '.json',
+            'text/plain': '.txt',
+            'text/csv': '.csv',
+            'application/xml': '.xml', 'text/xml': '.xml',
+            'application/graphql+json': '.graphql.json',
+            'application/graphql': '.graphql',
+        }
+        binary_prefixes = ('application/octet-stream','application/pdf','image/','video/','audio/')
         if capture_api:
             def on_response(resp):  # pragma: no cover - network heavy
                 try:
-                    ct = resp.headers.get('content-type','')
-                    if 'application/json' in ct:
-                        urlp = urlparse(resp.url)
-                        path = (urlp.path or '/')
-                        if path.endswith('/'): path += 'index.json'
-                        if not path.endswith('.json'): path += '.json'
-                        dest = os.path.join(api_dir, path.lstrip('/')) if api_dir else None
-                        if dest:
-                            os.makedirs(os.path.dirname(dest), exist_ok=True)
-                            with open(dest,'w',encoding='utf-8') as f: f.write(resp.text())
-                            captured.append(path)
-                            if api_capture_cb:
-                                try: api_capture_cb(len(captured))
-                                except Exception: pass
+                    ct = (resp.headers.get('content-type','') or '').split(';')[0].lower()
+                    urlp = urlparse(resp.url)
+                    # Decide if we capture
+                    should_capture=False; is_binary=False
+                    if any(ct.startswith(t) for t in capture_types):
+                        should_capture=True
+                    elif capture_api_binary and any(ct.startswith(b) for b in binary_prefixes):
+                        should_capture=True; is_binary=True
+                    if not should_capture:
+                        return
+                    path = (urlp.path or '/')
+                    if path.endswith('/'):
+                        # choose index + ext depending on type
+                        ext = ct_ext_map.get(ct, '.bin' if is_binary else '.txt')
+                        path += 'index'+ext
+                    # add extension if missing
+                    if not os.path.splitext(path)[1]:
+                        ext = ct_ext_map.get(ct, '.bin' if is_binary else '.txt')
+                        path += ext
+                    dest = os.path.join(api_dir, path.lstrip('/')) if api_dir else None
+                    if not dest:
+                        return
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    if is_binary:
+                        # binary save raw body
+                        try:
+                            body = resp.body()
+                            with open(dest,'wb') as f: f.write(body)
+                        except Exception:
+                            return
+                    else:
+                        # text path
+                        try:
+                            txt = resp.text()
+                        except Exception:
+                            return
+                        with open(dest,'w',encoding='utf-8',errors='replace') as f: f.write(txt)
+                    captured.append(path)
+                    if api_capture_cb:
+                        try: api_capture_cb(len(captured))
+                        except Exception: pass
                 except Exception:
                     pass
             context.on('response', on_response)
@@ -558,7 +598,7 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             except Exception as e:
                 emit(f"Failed prerender {url}: {e}")
         browser.close()
-        if capture_api: emit(f"Captured {len(captured)} JSON responses.")
+    if capture_api: emit(f"Captured {len(captured)} API responses.")
     emit(f"Prerender finished. Pages: {pages_processed}, Remaining queue: {len(to_visit)}")
     return {
         'pages_processed': pages_processed,
@@ -592,6 +632,8 @@ class CloneConfig:
     prerender: bool = False
     prerender_max_pages: int = DEFAULT_PRERENDER_MAX_PAGES
     capture_api: bool = False
+    capture_api_types: Optional[List[str]] = None  # list of content-type prefixes (defaults to application/json)
+    capture_api_binary: bool = False  # capture selected binary types (pdf, images, etc.)
     hook_script: Optional[str] = None
     rewrite_urls: bool = True
     # router
@@ -774,6 +816,10 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
             cmd.append(f"--prerender-max-pages={cfg.prerender_max_pages}")
         if cfg.capture_api:
             cmd.append("--capture-api")
+            if cfg.capture_api_types:
+                cmd.append(f"--capture-api-types={'/'.join(cfg.capture_api_types)}")
+            if getattr(cfg,'capture_api_binary',False):
+                cmd.append("--capture-api-binary")
         if not cfg.rewrite_urls:
             cmd.append("--no-url-rewrite")
     if cfg.router_intercept or cfg.router_allow or cfg.router_deny:
@@ -1095,6 +1141,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 output_folder=output_folder,
                 max_pages=cfg.prerender_max_pages,
                 capture_api=cfg.capture_api,
+                capture_api_types=cfg.capture_api_types,
+                capture_api_binary=cfg.capture_api_binary,
                 hook_script=cfg.hook_script,
                 rewrite_urls=cfg.rewrite_urls,
                 api_capture_cb=lambda n: _invoke(callbacks,'api_capture',n),
@@ -1359,6 +1407,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 'prerender_max_pages': cfg.prerender_max_pages if cfg.prerender else None,
                 'capture_api':cfg.capture_api if cfg.prerender else False,  # primary key (new schema)
                 'api_capture':cfg.capture_api if cfg.prerender else False,   # legacy alias parity
+                'capture_api_types': cfg.capture_api_types if (cfg.prerender and cfg.capture_api) else None,
+                'capture_api_binary': bool(cfg.capture_api_binary) if (cfg.prerender and cfg.capture_api) else False,
                 'checksums_included':cfg.checksums,
                 'checksums': cfg.checksums,  # alias for legacy naming
                 'checksum_extra_extensions':extra,
@@ -1732,7 +1782,9 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--open-browser', action='store_true', help='Open the URL after starting container')
     parser.add_argument('--prerender', action='store_true', help='After clone, prerender dynamic pages with Playwright (optional)')
     parser.add_argument('--prerender-max-pages', type=int, default=40)
-    parser.add_argument('--capture-api', action='store_true', help='Capture JSON API responses during prerender')
+    parser.add_argument('--capture-api', action='store_true', help='Capture API responses during prerender (JSON by default)')
+    parser.add_argument('--capture-api-types', default=None, help='Slash- or comma-separated list of content-type prefixes to capture (e.g. application/json,text/csv)')
+    parser.add_argument('--capture-api-binary', action='store_true', help='Also capture common binary types (pdf, images, octet-stream)')
     parser.add_argument('--hook-script', default=None, help='Path to Python script exposing on_page(page,url,context)')
     parser.add_argument('--no-url-rewrite', action='store_true', help='Disable rewriting absolute origin URLs to relative')
     parser.add_argument('--router-intercept', action='store_true', help='Intercept SPA router (history API)')
@@ -1784,11 +1836,17 @@ def headless_main(argv: list[str]) -> int:
         def api_capture(self, count: int): print(f"[api] captured {count}")
         def router_count(self, count: int): print(f"[router] routes {count}")
         def checksum(self, pct: int): print(f"[checksums] {pct}%")
+    # Normalize capture api types list
+    _cap_types=None
+    if getattr(args,'capture_api_types',None):
+        raw=args.capture_api_types.replace('/',',')
+        _cap_types=[p.strip() for p in raw.split(',') if p.strip()]
     cfg = CloneConfig(
         url=args.url, dest=args.dest, docker_name=args.docker_name, build=args.build, jobs=args.jobs,
         bind_ip=args.bind_ip, host_port=args.host_port, container_port=args.container_port, size_cap=args.size_cap,
     throttle=args.throttle, auth_user=args.auth_user, auth_pass=args.auth_pass, cookies_file=args.cookies_file, import_browser_cookies=args.import_browser_cookies, disable_js=args.disable_js,
         prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, capture_api=args.capture_api,
+        capture_api_types=_cap_types, capture_api_binary=args.capture_api_binary,
         hook_script=args.hook_script, rewrite_urls=(not args.no_url_rewrite), router_intercept=args.router_intercept,
         router_include_hash=args.router_include_hash, router_max_routes=args.router_max_routes,
         router_settle_ms=args.router_settle_ms, router_wait_selector=args.router_wait_selector,

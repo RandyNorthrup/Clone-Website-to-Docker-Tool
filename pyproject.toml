@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cw2dt"
-version = "1.1.1"
+version = "1.1.2"
 description = "Clone Website to Docker Tool: wget2 + optional prerender + Docker packaging (GUI + headless)."
 authors = [ { name = "Randy Northrup" } ]
 readme = "README.md"

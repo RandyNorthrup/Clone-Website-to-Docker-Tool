@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
 
+## [1.1.2] - 2025-10-01
+
+### Added (Extended API Capture)
+
+- Extended prerender API capture beyond JSON: new `--capture-api-types` (comma or slash separated content-type prefixes) and `--capture-api-binary` (optional common binary types: pdf, images, octet-stream, audio/video). Writes responses under `_api/` with inferred extensions.
+- Manifest fields `capture_api_types` and `capture_api_binary` record configuration.
+
+### Changed (Reproduction Command)
+
+- Reproduction command now includes new capture flags when set.
+- README updated previously (no additional doc changes needed for this incremental feature; future docs section pending).
+
+### Notes (Behavior)
+
+- Default behavior (without new flags) remains JSON-only capture to avoid disk overhead.
+
 ## [1.1.1] - 2025-10-01
 
 ### GUI Resizing
