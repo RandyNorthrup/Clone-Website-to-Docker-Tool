@@ -926,6 +926,9 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
     speed_re = re.compile(r"(?P<val>\d+(?:\.\d+)?)(?P<unit>[KMG]?)(?:B?/s|/s)")
     stream = proc.stderr
     start=time.time()
+    # Keep a small ring buffer of recent stderr lines so we can show a tail on failure.
+    from collections import deque
+    last_lines: deque[str] = deque(maxlen=25)
     if stream is not None:
         for line in stream:
             # Cooperative cancellation
@@ -940,6 +943,7 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
             except Exception:
                 pass
             if not line: continue
+            last_lines.append(line.rstrip())
             # percent
             for tok in line.split():
                 if tok.endswith('%'):
@@ -973,22 +977,38 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
             8:'Server error response (4xx/5xx).'
         }
         hint=hints.get(proc.returncode,'See wget2 docs for exit code details.')
-        # Attempt to rewind stderr buffer we already streamed: keep a ring of last lines during loop
-        # (We can collect them above; if not collected, just say unavailable.)
+        # Sanitize command (hide credentials/passwords) before logging
+        def _sanitize(tokens: List[str]) -> str:
+            sanitized=[]
+            skip_next=False
+            for i,t in enumerate(tokens):
+                if skip_next:
+                    skip_next=False
+                    continue
+                low=t.lower()
+                if any(k in low for k in ['password', 'auth-token', 'authorization']):
+                    # Patterns: --http-password=foo, --password foo, header 'Authorization: Bearer x'
+                    if '=' in t:
+                        k,v=t.split('=',1)
+                        sanitized.append(f"{k}=****")
+                    else:
+                        sanitized.append(f"{t} ****")
+                        # If style is "--password foo" skip next token (already masked)
+                        if low.startswith('--') and (i+1)<len(tokens) and '=' not in tokens[i+1]:
+                            skip_next=True
+                    continue
+                sanitized.append(t)
+            return ' '.join(sanitized)
         try:
-            if stream and not stream.closed:
-                pass  # already consumed line-by-line
+            _invoke(cb,'log',f"[wget2] command: {_sanitize(cmd)}")
         except Exception:
             pass
-        # Provide tail of captured lines (we can store in a local list as we parse)
-        try:
-            # If we modify parsing loop in future, accumulate into last_lines
-            last_lines=[]  # placeholder (future extension)
-            if last_lines:
-                for ln in last_lines[-6:]:
-                    _invoke(cb,'log',f"[wget2][tail] {ln.strip()}")
-        except Exception:
-            pass
+        # Provide tail of captured lines
+        if last_lines:
+            _invoke(cb,'log',f"[wget2] last {len(last_lines)} stderr lines (tail shown if long):")
+            tail=list(last_lines)[-8:]
+            for ln in tail:
+                _invoke(cb,'log',f"[wget2][tail] {ln}")
         _invoke(cb, 'log', f"[error] wget2 exit code {proc.returncode} – {hint}")
         return False
     if last_pct < 100:

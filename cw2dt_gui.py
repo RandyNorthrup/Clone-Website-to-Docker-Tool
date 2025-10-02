@@ -776,27 +776,29 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             return
         # Build scanning dialog with progress (indeterminate)
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
+        from PySide6.QtCore import QTimer
         scan_dlg=QDialog(self); scan_dlg.setWindowTitle('Wizard – Scanning')
         v=QVBoxLayout(scan_dlg)
-        lbl=L=QLabel(f'Scanning {url}\nFetching & analyzing...'); v.addWidget(lbl)
+        v.addWidget(QLabel(f'Scanning {url}\nFetching & analyzing...'))
         bar=QProgressBar(); bar.setRange(0,0); v.addWidget(bar)
         scan_dlg.setModal(True)
-        # Use a worker thread
-        from PySide6.QtCore import QThread, Signal, QObject
-        class _ScanWorker(QObject):
-            finished=Signal(dict)
-            def run(self):
-                data=_extended_analysis(url)
-                self.finished.emit(data)
-        worker=_ScanWorker(); thread=QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        def _done(data):
-            scan_dlg.accept()
-            thread.quit(); thread.wait(50)
-            self._wizard_show_results(data)
-        worker.finished.connect(_done)
-        thread.start()
+        # Background compute using standard threading (avoids extra Qt event filters)
+        import threading
+        result_holder={'data':None,'done':False}
+        def _worker():
+            try:
+                result_holder['data']=_extended_analysis(url)
+            finally:
+                result_holder['done']=True
+        threading.Thread(target=_worker,daemon=True).start()
+        def _poll():
+            if result_holder['done']:
+                data=result_holder['data'] or {}
+                scan_dlg.accept()
+                self._wizard_show_results(data)
+            else:
+                QTimer.singleShot(120,_poll)
+        QTimer.singleShot(120,_poll)
         scan_dlg.exec()
 
     def _apply_wizard_recommendations(self, info: dict, chk_states: dict):
