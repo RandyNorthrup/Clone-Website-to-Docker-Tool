@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.6"
+__version__ = "1.1.7"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.

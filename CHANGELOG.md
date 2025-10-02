@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
 
+## [1.1.7] - 2025-10-01
+
+### Added (QA & UX)
+
+- Test coverage for new fidelity flags: reproduction command now asserted to include `--dom-stable-ms`, `--dom-stable-timeout-ms`, and `--capture-graphql` when configured.
+- Manifest field tests ensuring presence of `dom_stable_ms`, `dom_stable_timeout_ms`, `capture_graphql`, and promoted `graphql_captured_count`.
+- GUI tooltips added for DOM stabilization spin boxes and GraphQL capture checkbox for clearer guidance.
+
+### Internal
+
+- Version bump to 1.1.7 (no core functional logic changes besides metadata & GUI tooltip additions / tests).
+
 ## [1.1.6] - 2025-10-01
 
 ### Added (GraphQL Capture)
