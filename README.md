@@ -472,6 +472,9 @@ Headless equivalents:
 ```bash
 --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 --extra-wget-args "--retry-on-http-error=429,500,503 --tries=3 --waitretry=2"
+--auto-backoff
+--log-redirect-chain
+--save-wget-stderr
 ```
 
 ### Common wget2 Exit Codes & Hints
@@ -505,6 +508,9 @@ If several 403 or 503 responses appear early, immediately try a custom User-Agen
 - **Icons not visible**: Place `web_logo.png`, `arrow_right.png`, `docker_logo.png` under `./images/`.
 - **Checksum verification failures**: Use `--verify-deep` to force strict error or inspect individual mismatches in `clone_manifest.json`.
 - **Performance tuning**: Start with moderate threads (8–12). If encountering server pressure, dial down.
+- **Auto Backoff Retry**: Enable this (GUI checkbox or `--auto-backoff`) to automatically retry once with half the threads and retry/backoff flags after an initial failure.
+- **Redirect Chain Logging**: Use `--log-redirect-chain` (or GUI checkbox) to print the resolved redirect path before cloning; useful to detect unexpected domain hops.
+- **Save wget stderr**: Enable to persist full low-level wget2 stderr to `wget_stderr.log` inside the output directory for deeper post-mortem.
 
 ### When to Use Extra Args
 
