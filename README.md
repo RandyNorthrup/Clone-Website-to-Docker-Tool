@@ -166,7 +166,7 @@ Authenticated (cookies + quota + throttle):
 python cw2dt.py --headless \
   --url "https://private.example.com" \
   --dest ~/Sites --docker-name portal \
-  --size-cap 2G --throttle 4M --jobs 12 \
+  --size-cap 2G --throttle 4M --max-threads 12 \
   --serve-folder --open-browser
 ```
 
@@ -209,7 +209,7 @@ Core:
 - `--run-built` Run image after building
 - `--serve-folder` Serve directly from folder (bind mount)
 - `--open-browser` Open served URL in default browser
-- `--jobs N` Parallel wget2 jobs (default auto: >=4)
+- Concurrency: Use `--max-threads N` (wget2 2.x). Older builds may only support `--jobs N`. The tool auto-detects the supported flag; in the GUI this appears as "Download Threads".
 - `--size-cap QUOTA` Download quota (e.g. 500M, 2G)
 - `--throttle RATE` Limit rate (e.g. 500K, 4M)
 - `--disable-js` Strip scripts + inject restrictive CSP post-clone
@@ -384,7 +384,7 @@ For the closest 1:1 snapshot of a modern SPA (deep navigation + dynamic content)
 python cw2dt.py --headless \
   --url "https://target.example" \
   --dest ./out --docker-name target \
-  --jobs 12 \
+  --max-threads 12 \
   --prerender --prerender-max-pages 120 \
   --router-intercept --router-max-routes 350 --router-settle-ms 900 \
   --capture-api --capture-api-types application/json,text/plain --capture-api-binary --capture-storage \
