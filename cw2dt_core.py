@@ -12,6 +12,7 @@ from __future__ import annotations
 import os, sys, subprocess, shutil, platform, socket, importlib, importlib.util, time, hashlib, json, webbrowser, uuid, re
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from typing import Tuple, Dict
 from typing import Optional, Callable, List, Dict, Any
 
 __version__ = "1.1.7"
@@ -829,6 +830,9 @@ class CloneConfig:
     progress_mode: str = 'plain'  # 'plain' or 'rich'
     user_agent: Optional[str] = None  # optional custom user-agent override for wget2 & prerender fetches
     extra_wget_args: Optional[str] = None  # raw extra arguments appended to wget2 invocation (advanced troubleshooting)
+    auto_backoff: bool = False              # automatically retry once with reduced threads & retry args on server errors
+    log_redirect_chain: bool = False        # preflight and log redirect chain before clone
+    save_wget_stderr: bool = False          # persist full wget2 stderr to file for diagnostics
     # internal cancellation hook (GUI injects)
     cancel_event: Any = None
     # internal / reserved
@@ -914,139 +918,90 @@ def _invoke(cb, name: str, *a):
         try: fn(*a)
         except Exception: pass
 
-def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
-    """Run wget2 streaming stderr to parse percentage + bandwidth, sending callbacks."""
+def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Optional[str]=None) -> bool:
+    """Run wget2 streaming stderr to parse percentage + bandwidth, with enhanced diagnostics."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
     except FileNotFoundError:
         _invoke(cb, 'log', 'Error: wget2 not found.')
         return False
-    last_pct = -1
-    last_rate = None
-    last_rate_time = 0.0
+    last_pct=-1; last_rate=None; last_rate_time=0.0
     import re
-    speed_re = re.compile(r"(?P<val>\d+(?:\.\d+)?)(?P<unit>[KMG]?)(?:B?/s|/s)")
-    stream = proc.stderr
-    start=time.time()
-    # Keep a small ring buffer of recent stderr lines so we can show a tail on failure.
+    speed_re=re.compile(r"(?P<val>\d+(?:\.\d+)?)(?P<unit>[KMG]?)(?:B?/s|/s)")
+    stream=proc.stderr; start=time.time()
     from collections import deque
-    last_lines: deque[str] = deque(maxlen=25)
-    http_codes: List[int] = []
+    last_lines: deque[str]=deque(maxlen=25)
+    http_codes: List[int]=[]
     if stream is not None:
         for line in stream:
-            # Cooperative cancellation
             try:
-                if cb and getattr(cb, 'is_canceled', None) and cb.is_canceled():
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-                    _invoke(cb, 'log', '[cancel] wget2 terminated')
-                    return False
-            except Exception:
-                pass
+                if cb and getattr(cb,'is_canceled',None) and cb.is_canceled():
+                    try: proc.terminate()
+                    except Exception: pass
+                    _invoke(cb,'log','[cancel] wget2 terminated'); return False
+            except Exception: pass
             if not line: continue
-            last_lines.append(line.rstrip())
-            # Collect HTTP status codes (e.g. 'HTTP/1.1 403' or ': 404 Not Found')
+            ln=line.rstrip(); last_lines.append(ln)
+            if save_path:
+                try:
+                    with open(save_path,'a',encoding='utf-8') as sf: sf.write(line)
+                except Exception: pass
+            # HTTP code collection
             try:
-                import re as _hre
-                for m in _hre.finditer(r'HTTP/\d\.\d\s+(\d{3})', line):
-                    code=int(m.group(1))
-                    if 100 <= code <= 599 and code not in http_codes:
-                        http_codes.append(code)
-                # fallback simple pattern
-                m2=_hre.search(r'\b(\d{3})\b', line)
-                if m2 and ('HTTP' in line or 'error' in line.lower()):
-                    code=int(m2.group(1))
-                    if 100 <= code <= 599 and code not in http_codes:
-                        http_codes.append(code)
-            except Exception:
-                pass
-            # percent
+                for m in re.finditer(r'HTTP/\d\.\d\s+(\d{3})', line):
+                    code=int(m.group(1));
+                    if 100<=code<=599 and code not in http_codes: http_codes.append(code)
+            except Exception: pass
+            # percent detection
             for tok in line.split():
                 if tok.endswith('%'):
-                    try: pct = int(tok[:-1])
+                    try: pct=int(tok[:-1])
                     except ValueError: continue
-                    if 0 <= pct <= 100 and pct != last_pct:
-                        last_pct = pct
-                        _invoke(cb, 'phase', 'clone', pct)
+                    if 0<=pct<=100 and pct!=last_pct:
+                        last_pct=pct; _invoke(cb,'phase','clone',pct)
                     break
-            if 's' in line:  # quick filter
-                m = speed_re.search(line)
+            if 's' in line:
+                m=speed_re.search(line)
                 if m:
-                    unit = m.group('unit') or ''
-                    val = m.group('val')
-                    rate = f"{val}{unit}B/s" if unit else f"{val}B/s"
-                    now=time.time()
-                    if (rate != last_rate) and (now - last_rate_time) > 0.25:
-                        last_rate = rate; last_rate_time = now
-                        _invoke(cb, 'bandwidth', rate)
+                    unit=m.group('unit') or ''; val=m.group('val'); rate=f"{val}{unit}B/s" if unit else f"{val}B/s"; now=time.time()
+                    if (rate!=last_rate) and (now-last_rate_time)>0.25:
+                        last_rate=rate; last_rate_time=now; _invoke(cb,'bandwidth',rate)
     proc.wait()
-    if proc.returncode != 0:
-        # Map some common wget2 exit codes to friendly hints
-        hints={
-            1:'Generic error (check URL / network).',
-            2:'Parse error / command usage problem (verify flags and URL quoting).',
-            3:'File I/O error (permissions or disk full).',
-            4:'Network failure (DNS / connection reset).',
-            5:'SSL/TLS verification failure.',
-            6:'Authentication failure (credentials / cookies).',
-            7:'Protocol error.',
-            8:'Server error response (4xx/5xx).'
-        }
+    if proc.returncode!=0:
+        hints={1:'Generic error (check URL / network).',2:'Parse error / usage problem.',3:'File I/O error.',4:'Network failure.',5:'SSL/TLS verification failure.',6:'Authentication failure.',7:'Protocol error.',8:'Server error response (4xx/5xx).'}
         hint=hints.get(proc.returncode,'See wget2 docs for exit code details.')
-        # Sanitize command (hide credentials/passwords) before logging
-        def _sanitize(tokens: List[str]) -> str:
-            sanitized=[]
-            skip_next=False
+        def _sanitize(tokens: List[str])->str:
+            out=[]; skip=False
             for i,t in enumerate(tokens):
-                if skip_next:
-                    skip_next=False
-                    continue
+                if skip: skip=False; continue
                 low=t.lower()
-                if any(k in low for k in ['password', 'auth-token', 'authorization']):
-                    # Patterns: --http-password=foo, --password foo, header 'Authorization: Bearer x'
+                if any(k in low for k in ['password','auth-token','authorization']):
                     if '=' in t:
-                        k,v=t.split('=',1)
-                        sanitized.append(f"{k}=****")
+                        k,_=t.split('=',1); out.append(f"{k}=****")
                     else:
-                        sanitized.append(f"{t} ****")
-                        # If style is "--password foo" skip next token (already masked)
-                        if low.startswith('--') and (i+1)<len(tokens) and '=' not in tokens[i+1]:
-                            skip_next=True
+                        out.append(f"{t} ****");
+                        if low.startswith('--') and (i+1)<len(tokens) and '=' not in tokens[i+1]: skip=True
                     continue
-                sanitized.append(t)
-            return ' '.join(sanitized)
-        try:
-            _invoke(cb,'log',f"[wget2] command: {_sanitize(cmd)}")
-        except Exception:
-            pass
-        # Provide tail of captured lines
+                out.append(t)
+            return ' '.join(out)
+        try: _invoke(cb,'log',f"[wget2] command: {_sanitize(cmd)}")
+        except Exception: pass
         if last_lines:
             _invoke(cb,'log',f"[wget2] last {len(last_lines)} stderr lines (tail shown if long):")
-            tail=list(last_lines)[-8:]
-            for ln in tail:
-                _invoke(cb,'log',f"[wget2][tail] {ln}")
-            # Specialized pattern diagnostics
+            for tail_ln in list(last_lines)[-8:]: _invoke(cb,'log',f"[wget2][tail] {tail_ln}")
             port_errs=[l for l in last_lines if 'Port number must be in the range' in l]
-            if len(port_errs) >= 3:
-                _invoke(cb,'log',"[hint] Repeated 'Port number must be in the range 1..65535' messages detected. This usually indicates malformed URLs (e.g. duplicated colon, stray : characters, or a space breaking the URL) or an upstream redirect appending an invalid port. Verify the URL exactly as wget2 sees it and consider using --print-repro to inspect the command. If the site forces an invalid Location: header, try adding --max-redirect=0 in Extra wget args and test manually.")
+            if len(port_errs)>=3:
+                _invoke(cb,'log',"[hint] Repeated 'Port number must be in the range 1..65535' messages – possible malformed URL or redirect adding invalid port. Try --print-repro, verify URL, maybe --max-redirect=0.")
         if http_codes:
-            _invoke(cb,'log', f"[wget2] observed HTTP status codes: {', '.join(str(c) for c in http_codes[:12])}")
-            # Add quick actionable hints for common problematic codes
-            if 403 in http_codes:
-                _invoke(cb,'log', '[hint] HTTP 403 detected – try a realistic User-Agent and/or provide cookies/auth.')
-            if 429 in http_codes:
-                _invoke(cb,'log', '[hint] HTTP 429 (rate limit) – lower threads and add retry args: --retry-on-http-error=429,503 --tries=3 --waitretry=2')
-            if 503 in http_codes:
-                _invoke(cb,'log', '[hint] HTTP 503 – server unavailable; reduce concurrency, add retries, possibly pause between runs.')
-            if 404 in http_codes and len(http_codes)==1:
-                _invoke(cb,'log', '[hint] Only 404 observed – verify the starting URL (trailing slash? www vs non-www?).')
-        _invoke(cb, 'log', f"[error] wget2 exit code {proc.returncode} – {hint}")
+            _invoke(cb,'log',f"[wget2] observed HTTP status codes: {', '.join(str(c) for c in http_codes[:12])}")
+            if 403 in http_codes: _invoke(cb,'log','[hint] HTTP 403 – set realistic User-Agent or supply cookies/auth.')
+            if 429 in http_codes: _invoke(cb,'log','[hint] HTTP 429 – reduce threads; add --retry-on-http-error=429,503 --tries=3 --waitretry=2')
+            if 503 in http_codes: _invoke(cb,'log','[hint] HTTP 503 – reduce concurrency; add retries/backoff.')
+            if 404 in http_codes and len(http_codes)==1: _invoke(cb,'log','[hint] Only 404 observed – verify start URL / redirection.')
+        _invoke(cb,'log',f"[error] wget2 exit code {proc.returncode} – {hint}")
         return False
-    if last_pct < 100:
-        _invoke(cb, 'phase', 'clone', 100)
-    _invoke(cb, 'log', f"[clone] elapsed {round(time.time()-start,2)}s")
+    if last_pct<100: _invoke(cb,'phase','clone',100)
+    _invoke(cb,'log',f"[clone] elapsed {round(time.time()-start,2)}s")
     return True
 
 def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
@@ -1419,12 +1374,55 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         if cfg.auth_pass is not None:
             wget_cmd += ['--http-password', cfg.auth_pass]
             log('[info] Using HTTP authentication (password not shown).')
+    # Optional redirect chain preflight
+    if getattr(cfg,'log_redirect_chain',False):
+        try:
+            import urllib.request
+            opener=urllib.request.build_opener()
+            resp=opener.open(cfg.url, timeout=10)
+            chain=[]
+            for h in getattr(resp,'headers',[]):
+                pass  # placeholder to ensure headers touched (pyright silence)
+            final_url=resp.geturl()
+            if final_url!=cfg.url:
+                chain.append(cfg.url)
+                chain.append(final_url)
+            if chain:
+                log('[redirect] chain: '+' -> '.join(chain))
+        except Exception as e:
+            log(f"[redirect] preflight failed: {e}")
     log('[clone] Running wget2...')
     j('phase_start', phase='clone')
     if _canceled('clone'):
         j('summary', success=False, canceled=True)
         return CloneResult(False, False, output_folder, output_folder, None, None, {})
-    if not _wget2_progress(wget_cmd, callbacks):
+    stderr_save=None
+    if getattr(cfg,'save_wget_stderr',False):
+        stderr_save=os.path.join(output_folder,'wget_stderr.log')
+        try:
+            if os.path.exists(stderr_save): os.remove(stderr_save)
+        except Exception: pass
+    success=_wget2_progress(wget_cmd, callbacks, save_path=stderr_save)
+    if not success and getattr(cfg,'auto_backoff',False) and cfg.jobs and cfg.jobs>4:
+        # Retry once with reduced threads + generic retry args (unless user already supplied retry flags)
+        log('[backoff] initial clone failed – attempting single reduced-concurrency retry...')
+        reduced=max(2, int(cfg.jobs/2))
+        # Remove previous concurrency token and add new one
+        wget_cmd=[t for t in wget_cmd if not t.startswith('--max-threads=') and not t.startswith('--jobs=')]
+        if _wget2_supports('--max-threads'):
+            wget_cmd.append(f"--max-threads={reduced}")
+        elif _wget2_supports('--jobs'):
+            wget_cmd.append(f"--jobs={reduced}")
+        # Add retry args if none present
+        if not any('--retry-on-http-error' in t for t in wget_cmd):
+            wget_cmd += ['--retry-on-http-error=429,500,503']
+        if not any('--tries=' in t or t=='--tries' for t in wget_cmd):
+            wget_cmd.append('--tries=3')
+        if not any('--waitretry=' in t or t=='--waitretry' for t in wget_cmd):
+            wget_cmd.append('--waitretry=2')
+        log(f"[backoff] retry command adjustments: threads={reduced}")
+        success=_wget2_progress(wget_cmd, callbacks, save_path=stderr_save)
+    if not success:
         if _canceled('clone'):
             j('summary', success=False, canceled=True)
             return CloneResult(False, False, output_folder, output_folder, None, None, {})
@@ -2176,6 +2174,9 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--progress', choices=['plain','rich'], default='plain', help='Progress rendering mode (rich requires optional dependency)')
     parser.add_argument('--user-agent', default=None, help='Override User-Agent for wget2 and prerender network requests')
     parser.add_argument('--extra-wget-args', default=None, help='Raw extra arguments appended to wget2 (advanced troubleshooting)')
+    parser.add_argument('--auto-backoff', action='store_true', help='On server error, retry once with reduced threads and retry/backoff flags')
+    parser.add_argument('--log-redirect-chain', action='store_true', help='Resolve and log HTTP redirect chain before cloning')
+    parser.add_argument('--save-wget-stderr', action='store_true', help='Save full wget2 stderr to file (wget_stderr.log) in output folder')
     args = parser.parse_args(argv)
 
     if args.selftest_verification:
@@ -2229,7 +2230,8 @@ def headless_main(argv: list[str]) -> int:
         verify_deep=args.verify_deep, incremental=args.incremental, diff_latest=args.diff_latest,
         plugins_dir=args.plugins_dir, json_logs=args.json_logs, profile=args.profile, open_browser=args.open_browser,
     run_built=args.run_built, serve_folder=args.serve_folder, cleanup=args.cleanup,
-    events_file=args.events_file, progress_mode=args.progress, user_agent=args.user_agent, extra_wget_args=args.extra_wget_args
+    events_file=args.events_file, progress_mode=args.progress, user_agent=args.user_agent, extra_wget_args=args.extra_wget_args,
+    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr
     )
     if args.print_repro:
         repro=_build_repro_command_from_config(cfg)
