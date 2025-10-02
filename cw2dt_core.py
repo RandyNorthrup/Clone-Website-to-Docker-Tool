@@ -1048,6 +1048,11 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
                         last_rate=rate; last_rate_time=now; _invoke(cb,'bandwidth',rate)
     proc.wait()
     malformed_host_count = len([l for l in last_lines if 'Missing host/domain in URI' in l])
+    # Expose for outer scope manifest enrichment
+    try:
+        nonlocal_malformed = locals().get('malformed_host_count')  # placeholder to satisfy linter style
+    except Exception:
+        pass
     if proc.returncode!=0:
         hints={1:'Generic error (check URL / network).',2:'Parse error / usage problem.',3:'File I/O error.',4:'Network failure.',5:'SSL/TLS verification failure.',6:'Authentication failure.',7:'Protocol error.',8:'Server error response (4xx/5xx).'}
         hint=hints.get(proc.returncode,'See wget2 docs for exit code details.')
@@ -1096,6 +1101,9 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
         f"--url={cfg.url}",
         f"--dest={cfg.dest}",
         f"--docker-name={cfg.docker_name}"]
+    prerender_attempts_used = 0
+    prerender_isolation_used = False
+    prerender_runtime_unavailable_retries = 0
     if cfg.prerender:
         cmd.append("--prerender")
         if cfg.prerender_max_pages != 40:
@@ -1553,6 +1561,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         isolation_used=False
         while attempt < max_attempts:
             attempt +=1
+            prerender_attempts_used = attempt
             if attempt>1:
                 log(f"[prerender] attempt {attempt}/{max_attempts}")
             try:
@@ -1608,10 +1617,12 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     delay=base_delay*attempt
                     log(f"[prerender] runtime unavailable (attempt {attempt}); retrying in {delay:.2f}s ...")
                     j('prerender_retry', attempt=attempt, reason='playwright_missing', delay=delay)
+                    prerender_runtime_unavailable_retries +=1
                     time.sleep(delay)
                     continue
                 if recoverable and attempt == max_attempts and not isolation_used:
                     isolation_used=True
+                    prerender_isolation_used = True
                     log('[prerender] in-process retries exhausted; switching to isolated subprocess fallback')
                     j('prerender_isolation', attempt=attempt, reason='playwright_missing')
                     iso_stats=_run_prerender_isolated(
@@ -1648,10 +1659,12 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     delay=base_delay*attempt
                     log(f"[prerender] attempt {attempt} failed ({msg}); retrying in {delay:.2f}s ...")
                     j('prerender_retry', attempt=attempt, reason='event_loop_closed', delay=delay)
+                    prerender_runtime_unavailable_retries +=1
                     time.sleep(delay)
                     continue
                 if recoverable and not isolation_used:
                     isolation_used=True
+                    prerender_isolation_used = True
                     log('[prerender] switching to isolated subprocess fallback due to repeated event loop closure')
                     j('prerender_isolation', attempt=attempt, reason='event_loop_closed')
                     iso_stats=_run_prerender_isolated(
@@ -1677,7 +1690,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     j('phase_error', phase='prerender', error=str(e), attempt=attempt)
                     _invoke(callbacks,'phase','prerender',100)
                     break
-        t_prer_end=time.time()
+    t_prer_end=time.time()
     # Strip JS if requested
     if cfg.disable_js:
         try:
@@ -1967,6 +1980,15 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     r=parse_rate_to_bps(cfg.throttle); manifest['throttle_bytes_per_sec']=r
             except Exception:
                 pass
+            # Add prerender meta regardless of prer_stats availability
+            try:
+                manifest['prerender_meta'] = {
+                    'attempts_used': prerender_attempts_used,
+                    'isolation_used': bool(prerender_isolation_used),
+                    'runtime_unavailable_retries': prerender_runtime_unavailable_retries
+                }
+            except Exception:
+                pass
             if isinstance(prer_stats,dict):
                 manifest['prerender_stats']={k:int(v) for k,v in prer_stats.items() if isinstance(v,(int,float))}
                 # Promote api & router counts to top-level for legacy parity
@@ -1978,6 +2000,12 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     manifest['storage_captured_count']=int(prer_stats.get('storage_captured',0))
                 if 'graphql_captured' in prer_stats:
                     manifest['graphql_captured_count']=int(prer_stats.get('graphql_captured',0))
+            # Malformed host/domain count exposure
+            try:
+                if 'malformed_host_count' in locals() and malformed_host_count:
+                    manifest['malformed_host_domain_lines'] = int(malformed_host_count)
+            except Exception:
+                pass
             # environment metadata
             try:
                 import platform, sys as _sys
