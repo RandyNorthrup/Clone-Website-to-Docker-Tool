@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.
@@ -400,6 +400,7 @@ def parse_rate_to_bps(text: str) -> int | None: return parse_size_to_bytes(text)
 # --- prerender (optional) ---
 def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages: int = 40,
                    capture_api: bool = False, hook_script: str | None = None,
+                   capture_storage: bool = False,
                    capture_api_types: list[str] | None = None,
                    capture_api_binary: bool = False,
                    rewrite_urls: bool = True, progress_cb=None, progress_percent_cb=None,
@@ -454,10 +455,13 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             if deny_res and any(r.search(norm) for r in deny_res): return False
             return True
         except Exception: return False
+    storage_dir = os.path.join(output_folder, '_storage') if capture_storage else None
+    if storage_dir: os.makedirs(storage_dir, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         captured=[]
+        storage_snapshots=0
         capture_types = [c.strip().lower() for c in (capture_api_types or ['application/json']) if c.strip()]
         # Map of common content-types to extension (fallback logic inside response handler)
         ct_ext_map = {
@@ -517,7 +521,7 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                     pass
             context.on('response', on_response)
         pages_processed=0
-        while to_visit and pages_processed < max_pages:
+    while to_visit and pages_processed < max_pages:
             url = to_visit.pop(0)
             if url in visited: continue
             visited.add(url)
@@ -578,6 +582,33 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                     if not rel.endswith('.html') and not rel.split('/')[-1].count('.'):
                         rel = rel.rstrip('/') + '.html'
                 except Exception: pass
+                if capture_storage and storage_dir:
+                    try:
+                        ls_keys = page.evaluate("Object.keys(localStorage)") or []
+                        ss_keys = page.evaluate("Object.keys(sessionStorage)") or []
+                        ls_data = {}
+                        ss_data = {}
+                        for k in ls_keys:
+                            try:
+                                safe_k = k.replace('\\', r'\\\\').replace("'", r"\\'")
+                                ls_data[k] = page.evaluate(f"localStorage.getItem('{safe_k}')")
+                            except Exception:
+                                pass
+                        for k in ss_keys:
+                            try:
+                                safe_k = k.replace('\\', r'\\\\').replace("'", r"\\'")
+                                ss_data[k] = page.evaluate(f"sessionStorage.getItem('{safe_k}')")
+                            except Exception:
+                                pass
+                        if ls_data or ss_data:
+                            storage_rel = rel[:-5] + '.storage.json' if rel.endswith('.html') else rel + '.storage.json'
+                            storage_path = os.path.join(storage_dir, storage_rel.lstrip('/'))
+                            os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+                            with open(storage_path,'w',encoding='utf-8') as sf:
+                                json.dump({'url': url, 'localStorage': ls_data, 'sessionStorage': ss_data}, sf, indent=2)
+                            storage_snapshots += 1
+                    except Exception:
+                        pass
                 out_path = os.path.join(site_root, rel.lstrip('/'))
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 with open(out_path,'w',encoding='utf-8') as f: f.write(html)
@@ -598,13 +629,15 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             except Exception as e:
                 emit(f"Failed prerender {url}: {e}")
         browser.close()
-    if capture_api: emit(f"Captured {len(captured)} API responses.")
-    emit(f"Prerender finished. Pages: {pages_processed}, Remaining queue: {len(to_visit)}")
-    return {
-        'pages_processed': pages_processed,
-        'routes_discovered': len(router_seen) if router_intercept else 0,
-        'api_captured': len(captured) if capture_api else 0
-    }
+        if capture_api: emit(f"Captured {len(captured)} API responses.")
+        if capture_storage: emit(f"Captured {storage_snapshots} storage snapshots.")
+        emit(f"Prerender finished. Pages: {pages_processed}, Remaining queue: {len(to_visit)}")
+        return {
+            'pages_processed': pages_processed,
+            'routes_discovered': len(router_seen) if router_intercept else 0,
+            'api_captured': len(captured) if capture_api else 0,
+            'storage_captured': storage_snapshots if capture_storage else 0
+        }
     if progress_percent_cb:
         try: progress_percent_cb(100)
         except Exception: pass
@@ -634,6 +667,7 @@ class CloneConfig:
     capture_api: bool = False
     capture_api_types: Optional[List[str]] = None  # list of content-type prefixes (defaults to application/json)
     capture_api_binary: bool = False  # capture selected binary types (pdf, images, etc.)
+    capture_storage: bool = False  # capture localStorage/sessionStorage per prerendered page
     hook_script: Optional[str] = None
     rewrite_urls: bool = True
     # router
@@ -820,6 +854,8 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
                 cmd.append(f"--capture-api-types={'/'.join(cfg.capture_api_types)}")
             if getattr(cfg,'capture_api_binary',False):
                 cmd.append("--capture-api-binary")
+        if getattr(cfg,'capture_storage',False):
+            cmd.append("--capture-storage")
         if not cfg.rewrite_urls:
             cmd.append("--no-url-rewrite")
     if cfg.router_intercept or cfg.router_allow or cfg.router_deny:
@@ -1141,6 +1177,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 output_folder=output_folder,
                 max_pages=cfg.prerender_max_pages,
                 capture_api=cfg.capture_api,
+                capture_storage=cfg.capture_storage,
                 capture_api_types=cfg.capture_api_types,
                 capture_api_binary=cfg.capture_api_binary,
                 hook_script=cfg.hook_script,
@@ -1409,6 +1446,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 'api_capture':cfg.capture_api if cfg.prerender else False,   # legacy alias parity
                 'capture_api_types': cfg.capture_api_types if (cfg.prerender and cfg.capture_api) else None,
                 'capture_api_binary': bool(cfg.capture_api_binary) if (cfg.prerender and cfg.capture_api) else False,
+                'capture_storage': bool(cfg.capture_storage) if cfg.prerender else False,
                 'checksums_included':cfg.checksums,
                 'checksums': cfg.checksums,  # alias for legacy naming
                 'checksum_extra_extensions':extra,
@@ -1440,6 +1478,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     manifest['api_captured_count']=int(prer_stats.get('api_captured',0))
                 if 'routes_discovered' in prer_stats:
                     manifest['router_routes']=int(prer_stats.get('routes_discovered',0))
+                if 'storage_captured' in prer_stats:
+                    manifest['storage_captured_count']=int(prer_stats.get('storage_captured',0))
             # environment metadata
             try:
                 import platform, sys as _sys
@@ -1785,6 +1825,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--capture-api', action='store_true', help='Capture API responses during prerender (JSON by default)')
     parser.add_argument('--capture-api-types', default=None, help='Slash- or comma-separated list of content-type prefixes to capture (e.g. application/json,text/csv)')
     parser.add_argument('--capture-api-binary', action='store_true', help='Also capture common binary types (pdf, images, octet-stream)')
+    parser.add_argument('--capture-storage', action='store_true', help='Capture localStorage/sessionStorage snapshots during prerender')
     parser.add_argument('--hook-script', default=None, help='Path to Python script exposing on_page(page,url,context)')
     parser.add_argument('--no-url-rewrite', action='store_true', help='Disable rewriting absolute origin URLs to relative')
     parser.add_argument('--router-intercept', action='store_true', help='Intercept SPA router (history API)')
@@ -1847,6 +1888,7 @@ def headless_main(argv: list[str]) -> int:
     throttle=args.throttle, auth_user=args.auth_user, auth_pass=args.auth_pass, cookies_file=args.cookies_file, import_browser_cookies=args.import_browser_cookies, disable_js=args.disable_js,
         prerender=args.prerender, prerender_max_pages=args.prerender_max_pages, capture_api=args.capture_api,
         capture_api_types=_cap_types, capture_api_binary=args.capture_api_binary,
+        capture_storage=args.capture_storage,
         hook_script=args.hook_script, rewrite_urls=(not args.no_url_rewrite), router_intercept=args.router_intercept,
         router_include_hash=args.router_include_hash, router_max_routes=args.router_max_routes,
         router_settle_ms=args.router_settle_ms, router_wait_selector=args.router_wait_selector,

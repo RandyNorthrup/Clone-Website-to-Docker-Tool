@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
 
+## [1.1.3] - 2025-10-01
+
+### Added (Storage Capture)
+
+- Added `--capture-storage` option to snapshot `localStorage` and `sessionStorage` for each prerendered page (writes JSON files under `_storage/` mirroring HTML path with `.storage.json` suffix).
+- Manifest fields: `capture_storage` (bool) and `storage_captured_count` (count in `prerender_stats` promoted fields).
+
+### Changed (Prerender Output)
+
+- Prerender return stats now include `storage_captured` count; reproduction command includes `--capture-storage` when active.
+
+### Notes (Scope)
+
+- Only key/value pairs accessible to page scripts are captured; IndexedDB/service workers still pending roadmap.
+
+
 ## [1.1.2] - 2025-10-01
 
 ### Added (Extended API Capture)
