@@ -961,7 +961,35 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks]) -> bool:
                         _invoke(cb, 'bandwidth', rate)
     proc.wait()
     if proc.returncode != 0:
-        _invoke(cb, 'log', f"[error] wget2 exit code {proc.returncode}")
+        # Map some common wget2 exit codes to friendly hints
+        hints={
+            1:'Generic error (check URL / network).',
+            2:'Parse error / command usage problem (verify flags and URL quoting).',
+            3:'File I/O error (permissions or disk full).',
+            4:'Network failure (DNS / connection reset).',
+            5:'SSL/TLS verification failure.',
+            6:'Authentication failure (credentials / cookies).',
+            7:'Protocol error.',
+            8:'Server error response (4xx/5xx).'
+        }
+        hint=hints.get(proc.returncode,'See wget2 docs for exit code details.')
+        # Attempt to rewind stderr buffer we already streamed: keep a ring of last lines during loop
+        # (We can collect them above; if not collected, just say unavailable.)
+        try:
+            if stream and not stream.closed:
+                pass  # already consumed line-by-line
+        except Exception:
+            pass
+        # Provide tail of captured lines (we can store in a local list as we parse)
+        try:
+            # If we modify parsing loop in future, accumulate into last_lines
+            last_lines=[]  # placeholder (future extension)
+            if last_lines:
+                for ln in last_lines[-6:]:
+                    _invoke(cb,'log',f"[wget2][tail] {ln.strip()}")
+        except Exception:
+            pass
+        _invoke(cb, 'log', f"[error] wget2 exit code {proc.returncode} – {hint}")
         return False
     if last_pct < 100:
         _invoke(cb, 'phase', 'clone', 100)
