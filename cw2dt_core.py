@@ -833,6 +833,7 @@ class CloneConfig:
     auto_backoff: bool = False              # automatically retry once with reduced threads & retry args on server errors
     log_redirect_chain: bool = False        # preflight and log redirect chain before clone
     save_wget_stderr: bool = False          # persist full wget2 stderr to file for diagnostics
+    insecure: bool = False                  # ignore TLS certificate validation (diagnostic / insecure)
     # internal cancellation hook (GUI injects)
     cancel_event: Any = None
     # internal / reserved
@@ -1076,6 +1077,8 @@ def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
                 cmd.append(tok)
         except Exception:
             pass
+    if getattr(cfg,'insecure',False):
+        cmd.append('--insecure')
     if cfg.checksums:
         cmd.append("--checksums")
         if cfg.checksum_ext:
@@ -1282,6 +1285,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
     wget_cmd = [ 'wget2','-e','robots=off','--mirror','--convert-links','--adjust-extension','--page-requisites','--no-parent','--continue','--progress=dot:mega', cfg.url,'-P', output_folder ]
     if isinstance(getattr(cfg,'user_agent',None),str) and cfg.user_agent:
         wget_cmd += ['--user-agent', cfg.user_agent]
+    if getattr(cfg,'insecure',False):  # diagnostic / insecure mode
+        wget_cmd.append('--no-check-certificate')
     # Cookie handling: existing cookie file first
     if cfg.cookies_file and os.path.exists(cfg.cookies_file):
         wget_cmd += ['--load-cookies', cfg.cookies_file]
@@ -2177,6 +2182,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--auto-backoff', action='store_true', help='On server error, retry once with reduced threads and retry/backoff flags')
     parser.add_argument('--log-redirect-chain', action='store_true', help='Resolve and log HTTP redirect chain before cloning')
     parser.add_argument('--save-wget-stderr', action='store_true', help='Save full wget2 stderr to file (wget_stderr.log) in output folder')
+    parser.add_argument('--insecure', action='store_true', help='IGNORE TLS certificate validation (adds --no-check-certificate to wget2). Diagnostic-only; do not use routinely.')
     args = parser.parse_args(argv)
 
     if args.selftest_verification:
@@ -2231,7 +2237,7 @@ def headless_main(argv: list[str]) -> int:
         plugins_dir=args.plugins_dir, json_logs=args.json_logs, profile=args.profile, open_browser=args.open_browser,
     run_built=args.run_built, serve_folder=args.serve_folder, cleanup=args.cleanup,
     events_file=args.events_file, progress_mode=args.progress, user_agent=args.user_agent, extra_wget_args=args.extra_wget_args,
-    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr
+    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr, insecure=args.insecure
     )
     if args.print_repro:
         repro=_build_repro_command_from_config(cfg)

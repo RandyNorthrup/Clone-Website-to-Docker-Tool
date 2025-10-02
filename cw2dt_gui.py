@@ -201,8 +201,13 @@ class DockerClonerGUI(QWidget):
         self.chk_auto_backoff=QCheckBox('Auto Backoff Retry')
         self.chk_log_redirect_chain=QCheckBox('Log Redirect Chain')
         self.chk_save_wget_stderr=QCheckBox('Save wget stderr')
-        for w in (QLabel('User-Agent Override:'), self.user_agent_in, QLabel('Extra wget2 Args:'), self.extra_wget_args_in,
-                  self.chk_auto_backoff, self.chk_log_redirect_chain, self.chk_save_wget_stderr, self.btn_diagnose):
+        self.chk_insecure_tls=QCheckBox('Ignore TLS Cert (insecure)')
+        for w in (
+            QLabel('User-Agent Override:'), self.user_agent_in,
+            QLabel('Extra wget2 Args:'), self.extra_wget_args_in,
+            self.chk_auto_backoff, self.chk_log_redirect_chain, self.chk_save_wget_stderr,
+            self.chk_insecure_tls, self.btn_diagnose
+        ):
             trouble.addWidget(w)
         config_v.addWidget(trouble)
         config_v.addStretch(1)
@@ -365,6 +370,7 @@ class DockerClonerGUI(QWidget):
             'chk_auto_backoff':"If initial clone fails (server/5xx), retry once with fewer threads + retry/backoff args.",
             'chk_log_redirect_chain':"Preflight HEAD/GET to log the redirect chain before cloning.",
             'chk_save_wget_stderr':"Save full wget2 stderr to wget_stderr.log inside output folder for deep analysis.",
+            'chk_insecure_tls':"Add --no-check-certificate to wget2 (diagnostic only, disables TLS validation – security risk).",
         }
         for name,text in tt.items():
             w=getattr(self,name,None)
@@ -574,6 +580,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         if hasattr(self,'chk_auto_backoff'): self.chk_auto_backoff.setChecked(False)
         if hasattr(self,'chk_log_redirect_chain'): self.chk_log_redirect_chain.setChecked(False)
         if hasattr(self,'chk_save_wget_stderr'): self.chk_save_wget_stderr.setChecked(False)
+        if hasattr(self,'chk_insecure_tls'): self.chk_insecure_tls.setChecked(False)
         # Re-run interlock logic and dependency banner
         self._on_prerender_toggled(self.chk_prerender.isChecked())
         self._update_dependency_banner()
@@ -610,6 +617,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'auto_backoff': self.chk_auto_backoff.isChecked() if hasattr(self,'chk_auto_backoff') else False,
             'log_redirect_chain': self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
             'save_wget_stderr': self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
+            ,'insecure': self.chk_insecure_tls.isChecked() if hasattr(self,'chk_insecure_tls') else False
         }
     def _apply_profile_dict(self, data: dict):
         try:
@@ -666,6 +674,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             if hasattr(self,'chk_auto_backoff'): self.chk_auto_backoff.setChecked(bool(data.get('auto_backoff')))
             if hasattr(self,'chk_log_redirect_chain'): self.chk_log_redirect_chain.setChecked(bool(data.get('log_redirect_chain')))
             if hasattr(self,'chk_save_wget_stderr'): self.chk_save_wget_stderr.setChecked(bool(data.get('save_wget_stderr')))
+            if hasattr(self,'chk_insecure_tls'): self.chk_insecure_tls.setChecked(bool(data.get('insecure')))
             # Refresh wizard availability after loading profile
             try:
                 self.btn_wizard.setEnabled(bool(self.url_in.text().strip()))
@@ -959,6 +968,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             auto_backoff=self.chk_auto_backoff.isChecked() if hasattr(self,'chk_auto_backoff') else False,
             log_redirect_chain=self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
             save_wget_stderr=self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
+            ,insecure=self.chk_insecure_tls.isChecked() if hasattr(self,'chk_insecure_tls') else False
         )
         setattr(cfg,'cleanup', self.chk_cleanup.isChecked())
         return cfg
@@ -1381,7 +1391,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
  - Reduce threads (try 4-6) if rate limiting suspected.
  - Add retries: e.g. --retry-on-http-error=429,500,503 --tries=3 --waitretry=2""")
             elif exit_code==5:
-                hints.append('Exit 5: SSL/TLS issue. If certificate problems, you can test with --no-check-certificate (not recommended long-term).')
+                hints.append('Exit 5: SSL/TLS issue. To diagnose only, enable "Ignore TLS Cert" (adds --no-check-certificate) then re-run; if it works fix the site certificate or supply a custom CA. Disable afterward.')
             elif exit_code==6:
                 hints.append('Exit 6: Authentication problem. Verify auth_user/auth_pass or cookie file validity.')
             elif exit_code==4:

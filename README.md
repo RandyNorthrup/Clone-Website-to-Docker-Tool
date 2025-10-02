@@ -475,6 +475,7 @@ Headless equivalents:
 --auto-backoff
 --log-redirect-chain
 --save-wget-stderr
+--insecure            # (diagnostic) ignore TLS cert validation (adds --no-check-certificate)
 ```
 
 ### Common wget2 Exit Codes & Hints
@@ -484,6 +485,7 @@ Headless equivalents:
 | 2 | Usage / parse error | Bad extra args, malformed flags | Re-check `--extra-wget-args`, remove one flag at a time |
 | 4 | Network failure | DNS issues, transient outages, proxy / firewall interference | Add retries/backoff, verify connectivity, reduce threads |
 | 5 | SSL/TLS error | Cert validation failure, protocol mismatch | Confirm HTTPS works in browser, consider (temporary) `--no-check-certificate` for diagnosis only |
+|   | (Insecure bypass) | (Diagnostic only) | Use GUI "Ignore TLS Cert" or `--insecure` to confirm cause, then remove and fix chain |
 | 6 | Authentication failure | Invalid credentials/cookies | Re-export cookies, verify auth_user/pass, ensure logged-in session still valid |
 | 8 | Server error (4xx/5xx bursts) | Bot blocks, rate limiting, anti-scrape, overload | Set realistic UA, lower threads (try 4–6), add retry/backoff (429/500/503), stagger runs |
 
@@ -511,6 +513,7 @@ If several 403 or 503 responses appear early, immediately try a custom User-Agen
 - **Auto Backoff Retry**: Enable this (GUI checkbox or `--auto-backoff`) to automatically retry once with half the threads and retry/backoff flags after an initial failure.
 - **Redirect Chain Logging**: Use `--log-redirect-chain` (or GUI checkbox) to print the resolved redirect path before cloning; useful to detect unexpected domain hops.
 - **Save wget stderr**: Enable to persist full low-level wget2 stderr to `wget_stderr.log` inside the output directory for deeper post-mortem.
+- **Ignore TLS Cert (insecure)**: Adds `--no-check-certificate` to skip TLS validation purely for diagnosis of exit code 5 issues. Do not leave enabled for normal runs (security risk / MITM exposure).
 
 ### When to Use Extra Args
 
