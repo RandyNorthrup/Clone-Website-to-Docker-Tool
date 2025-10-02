@@ -450,14 +450,74 @@ Performance Caveats:
 
 ## Troubleshooting
 
-- **Missing dependencies**: Use the GUI "Fix Dependencies…" button for install / view commands.
+The GUI now includes a dedicated **Troubleshooting** collapsible panel exposing:
+
+1. **User-Agent Override** – Many sites return 403/406/5xx or aggressively throttle when they detect default crawler identifiers. Provide a realistic modern browser UA (e.g. latest Chrome) to improve acceptance.
+1. **Extra wget2 Args** – Raw passthrough for advanced tuning (retries, backoff, header overrides). Example:
+
+  ```bash
+  --retry-on-http-error=429,500,503 --tries=3 --waitretry=2 --timeout=20
+  ```
+
+1. **Diagnose Last Error** – Analyzes the tail of the console log (recent ~80 lines) to detect:
+
+  - wget2 exit codes (2,4,5,6,8)
+  - Common HTTP status patterns (403,404,429,503)
+  - Missing custom User-Agent / retry/backoff hints
+
+  Suggestions are displayed in a dialog and echoed (summarized) back into the console with `[diag]` prefixes.
+
+Headless equivalents:
+
+```bash
+--user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+--extra-wget-args "--retry-on-http-error=429,500,503 --tries=3 --waitretry=2"
+```
+
+### Common wget2 Exit Codes & Hints
+
+| Code | Meaning (Simplified) | Typical Causes | Recommended Actions |
+|------|----------------------|----------------|--------------------|
+| 2 | Usage / parse error | Bad extra args, malformed flags | Re-check `--extra-wget-args`, remove one flag at a time |
+| 4 | Network failure | DNS issues, transient outages, proxy / firewall interference | Add retries/backoff, verify connectivity, reduce threads |
+| 5 | SSL/TLS error | Cert validation failure, protocol mismatch | Confirm HTTPS works in browser, consider (temporary) `--no-check-certificate` for diagnosis only |
+| 6 | Authentication failure | Invalid credentials/cookies | Re-export cookies, verify auth_user/pass, ensure logged-in session still valid |
+| 8 | Server error (4xx/5xx bursts) | Bot blocks, rate limiting, anti-scrape, overload | Set realistic UA, lower threads (try 4–6), add retry/backoff (429/500/503), stagger runs |
+
+If several 403 or 503 responses appear early, immediately try a custom User-Agent and a lower thread count. For 429 (Too Many Requests) add `--waitretry` to introduce exponential pauses.
+
+### HTTP Status Patterns
+
+- **403 Forbidden**: Usually mitigated by UA override and/or cookies (logged-in context).
+- **404 Not Found**: Confirm start URL; check for base path redirects you may need to include.
+- **429 Too Many Requests**: Lower concurrency (`--max-threads 4-6`) + retry/backoff.
+- **503 Service Unavailable**: Server load or intentional throttling; combine lower concurrency + retry + delay between runs.
+
+### General Guidance
+
+- **Missing dependencies**: Use the GUI "Dependencies" button for install/view commands.
 - **Playwright not found**: Install it (`pip install playwright && playwright install chromium`) or disable prerender.
 - **Permission denied (Linux)**: Add your user to the `docker` group, then re-login (`newgrp docker`).
-- **Port in use**: You'll be prompted to choose another or the run will fail-fast.
-- **Slow or incomplete SPA content**: Increase `--prerender-max-pages` and/or add waits in a hook script.
+- **Port in use**: Choose another or the run fails fast.
+- **Slow or incomplete SPA content**: Increase `--prerender-max-pages`; if infinite scroll, add `--prerender-scroll` and/or a hook script.
 - **Authentication needed for dynamic assets**: Use browser cookies or HTTP auth before prerender.
-- **Cloning interrupted**: Re-run with same output and wget2 will resume.
-- **Icons not visible**: Place `web_logo.png`, `arrow_right.png`, `docker_logo.png` under `./images/` or alongside the script.
+- **Interrupted clone**: Re-run; wget2 resumes.
+- **Icons not visible**: Place `web_logo.png`, `arrow_right.png`, `docker_logo.png` under `./images/`.
+- **Checksum verification failures**: Use `--verify-deep` to force strict error or inspect individual mismatches in `clone_manifest.json`.
+- **Performance tuning**: Start with moderate threads (8–12). If encountering server pressure, dial down.
+
+### When to Use Extra Args
+
+Examples:
+
+| Scenario | Extra Args Example |
+|----------|--------------------|
+| Rate limiting (429) | `--retry-on-http-error=429,500,503 --tries=4 --waitretry=2` |
+| Sporadic TLS timeouts | `--tries=3 --timeout=25` |
+| Slow server, need pacing | `--wait=0.5` (introduces 0.5s between retrievals) |
+| Debug headers | `--debug` (verbose; trim after diagnosing) |
+
+Avoid piling on too many options first attempt; add incrementally and re-run diagnostics.
 
 ---
 

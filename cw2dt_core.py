@@ -2143,6 +2143,8 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--report', choices=['json','md'], default=None, help='Generate a clone_report.json or clone_report.md summary file')
     parser.add_argument('--events-file', default=None, help='Write JSON events (when --json-logs) additionally to this NDJSON file')
     parser.add_argument('--progress', choices=['plain','rich'], default='plain', help='Progress rendering mode (rich requires optional dependency)')
+    parser.add_argument('--user-agent', default=None, help='Override User-Agent for wget2 and prerender network requests')
+    parser.add_argument('--extra-wget-args', default=None, help='Raw extra arguments appended to wget2 (advanced troubleshooting)')
     args = parser.parse_args(argv)
 
     if args.selftest_verification:
@@ -2196,7 +2198,7 @@ def headless_main(argv: list[str]) -> int:
         verify_deep=args.verify_deep, incremental=args.incremental, diff_latest=args.diff_latest,
         plugins_dir=args.plugins_dir, json_logs=args.json_logs, profile=args.profile, open_browser=args.open_browser,
     run_built=args.run_built, serve_folder=args.serve_folder, cleanup=args.cleanup,
-    events_file=args.events_file, progress_mode=args.progress
+    events_file=args.events_file, progress_mode=args.progress, user_agent=args.user_agent, extra_wget_args=args.extra_wget_args
     )
     if args.print_repro:
         repro=_build_repro_command_from_config(cfg)
