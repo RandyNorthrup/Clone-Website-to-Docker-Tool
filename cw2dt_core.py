@@ -1139,12 +1139,35 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     pass
         except Exception:
             pass
+    # Helper: compute final output folder without duplicating project name if user already included it in dest
+    def _compute_output_folder() -> str:
+        base = cfg.dest
+        proj = cfg.docker_name or 'site'
+        try:
+            # Normalize trailing slashes and compare last path component
+            if os.path.basename(os.path.normpath(base)) == proj:
+                return base
+        except Exception:
+            pass
+        return os.path.join(base, proj)
+
+    # Cache wget2 help parsing so we only detect flags once per process
+    _wget2_flag_cache: dict[str,bool] = {}
+    def _wget2_supports(flag: str) -> bool:
+        if flag in _wget2_flag_cache: return _wget2_flag_cache[flag]
+        try:
+            out = subprocess.run(['wget2','--help'], capture_output=True, text=True, timeout=5)
+            _wget2_flag_cache[flag] = (flag in out.stdout)
+        except Exception:
+            _wget2_flag_cache[flag] = False
+        return _wget2_flag_cache[flag]
+
     # Validate prerequisites
     # Test simulation: allow forcing tool absence / cancellation via env for deterministic exit code tests
     _force_cancel = bool(os.environ.get('CW2DT_FORCE_CANCEL'))
     _force_no_wget = bool(os.environ.get('CW2DT_FORCE_NO_WGET'))
     if _force_cancel:
-        output_folder = os.path.join(cfg.dest, cfg.docker_name or 'site')
+        output_folder = _compute_output_folder()
         os.makedirs(output_folder, exist_ok=True)
         manifest_path = os.path.join(output_folder, 'clone_manifest.json')
         j('start', url=cfg.url, output=output_folder, forced_cancel=True)
@@ -1157,7 +1180,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         return CloneResult(False, False, output_folder, output_folder, manifest_path, None, {})
     if _force_no_wget or not is_wget2_available():
         # Degraded path: create minimal output + manifest (if allowed) so regex analysis & tests can still run.
-        output_folder = os.path.join(cfg.dest, cfg.docker_name or 'site')
+        output_folder = _compute_output_folder()
         os.makedirs(output_folder, exist_ok=True)
         j('start', url=cfg.url, output=output_folder, wget2_missing=True)
         log('Error: wget2 is required but not found. Proceeding in degraded mode for manifest generation.')
@@ -1185,7 +1208,7 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 manifest_path=None
         j('summary', success=False, canceled=False, error='wget2_missing')
         return CloneResult(False, False, output_folder, site_root, manifest_path, None, {}, run_id)
-    output_folder = os.path.join(cfg.dest, cfg.docker_name or 'site')
+    output_folder = _compute_output_folder()
     os.makedirs(output_folder, exist_ok=True)
     log(f"[clone] Output: {output_folder}")
     # Early regex safety analysis (emits events regardless of later clone success)
@@ -1308,13 +1331,22 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         except Exception as e:
             log(f"[cookies] unexpected error: {e}")
     if cfg.incremental: wget_cmd.append('-N')
-    # Parallel jobs: use long form '--jobs=N' (previous short '-j' caused 'Unknown option')
+    # Parallel concurrency: adapt to wget2 version (current versions use --max-threads; older experimental builds might offer --jobs)
     if cfg.jobs and cfg.jobs > 1:
-        try:
-            wget_cmd.append(f"--jobs={int(cfg.jobs)}")
-        except Exception:
-            # Fallback: omit jobs flag if something unexpected happens
-            pass
+        chosen_flag = None
+        # Prefer --max-threads if available
+        if _wget2_supports('--max-threads'):
+            chosen_flag = '--max-threads'
+        elif _wget2_supports('--jobs'):
+            chosen_flag = '--jobs'
+        if chosen_flag:
+            try:
+                wget_cmd.append(f"{chosen_flag}={int(cfg.jobs)}")
+                log(f"[info] Using concurrency flag {chosen_flag}={int(cfg.jobs)}")
+            except Exception:
+                pass
+        else:
+            log('[warn] wget2 concurrency flag not detected (no --max-threads / --jobs in help); using default threading.')
     if cfg.size_cap:
         b = parse_size_to_bytes(cfg.size_cap)
         if b: wget_cmd += ['--quota', human_quota_suffix(b)]
