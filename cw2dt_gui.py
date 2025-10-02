@@ -145,8 +145,13 @@ class DockerClonerGUI(QWidget):
         self.spin_dom_stable.setToolTip('Require this many ms of no DOM mutations before snapshot (0 disables).')
         self.spin_dom_stable_timeout=QSpinBox(); self.spin_dom_stable_timeout.setRange(500,30000); self.spin_dom_stable_timeout.setValue(4000)
         self.spin_dom_stable_timeout.setToolTip('Maximum additional wait attempting DOM stability per page.')
+        # New API/storage capture flags
         self.chk_capture_api=QCheckBox('Capture API JSON')
+        self.chk_capture_api_binary=QCheckBox('Capture API Binary')
         self.chk_capture_graphql=QCheckBox('Capture GraphQL')
+        self.chk_capture_storage=QCheckBox('Capture Storage (local/session)')
+        self.api_types_in=QLineEdit(); self.api_types_in.setPlaceholderText('API content-types e.g. application/json,text/csv')
+        api_types_row=QHBoxLayout(); api_types_row.addWidget(QLabel('API Types:')); api_types_row.addWidget(self.api_types_in)
         self.hook_in=QLineEdit()
         hr=QHBoxLayout(); hr.addWidget(QLabel('Hook Script:')); hr.addWidget(self.hook_in); hb=QPushButton('...'); hr.addWidget(hb); hb.clicked.connect(lambda: self._pick_file(self.hook_in))
         dyn.addWidget(self.chk_prerender)
@@ -155,7 +160,10 @@ class DockerClonerGUI(QWidget):
         dyn.addWidget(QLabel('Dom Stable (ms):')); dyn.addWidget(self.spin_dom_stable)
         dyn.addWidget(QLabel('Stable Timeout (ms):')); dyn.addWidget(self.spin_dom_stable_timeout)
         dyn.addWidget(self.chk_capture_api)
+        dyn.addWidget(self.chk_capture_api_binary)
         dyn.addWidget(self.chk_capture_graphql)
+        dyn.addWidget(self.chk_capture_storage)
+        dyn.addLayout(api_types_row)
         dyn.addLayout(hr)
         config_v.addWidget(dyn)
         # Router
@@ -265,7 +273,10 @@ class DockerClonerGUI(QWidget):
             'spin_dom_stable':"Quiet window (ms) of no DOM mutations required before snapshot; helps avoid half-rendered captures (0 disables).",
             'spin_dom_stable_timeout':"Maximum total extra wait (ms) spent trying to achieve a stable DOM before giving up per page.",
             'chk_capture_api':"Capture JSON / API responses encountered during prerender for offline reproduction.",
+            'chk_capture_api_binary':"Capture selected binary API responses (pdf, images, octet-stream) during prerender.",
             'chk_capture_graphql':"Capture GraphQL POST operations (request + response) into _graphql/ for offline analysis.",
+            'chk_capture_storage':"Capture per-page localStorage/sessionStorage snapshots to _storage/.",
+            'api_types_in':"Override default API content-types (slash or comma separated list of prefixes). Leave blank for application/json.",
             'hook_in':"Optional Python hook script executed for advanced customization (e.g. tweaking manifest).",
             'chk_router':"Intercept client-side navigation (history/pushState) to enumerate additional SPA routes.",
             'chk_route_hash':"Include hash fragment (#) as distinct route during interception.",
@@ -702,7 +713,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             auth_user=self.auth_user.text().strip() or None, auth_pass=self.auth_pass.text().strip() or None,
             cookies_file=self.cookies_file.text().strip() or None, import_browser_cookies=self.chk_import_browser_cookies.isChecked(), disable_js=self.chk_disable_js.isChecked(),
             prerender=self.chk_prerender.isChecked(), prerender_max_pages=self.spin_prer_pages.value(), capture_api=self.chk_capture_api.isChecked(), hook_script=self.hook_in.text().strip() or None, prerender_scroll=self.spin_prer_scroll.value(),
-            capture_graphql=self.chk_capture_graphql.isChecked(),
+            capture_graphql=self.chk_capture_graphql.isChecked(), capture_storage=self.chk_capture_storage.isChecked(), capture_api_binary=self.chk_capture_api_binary.isChecked(),
+            capture_api_types=[t.strip() for t in re.split(r'[,/]', self.api_types_in.text().strip()) if t.strip()] or None,
             dom_stable_ms=self.spin_dom_stable.value(), dom_stable_timeout_ms=self.spin_dom_stable_timeout.value(),
             rewrite_urls=True, router_intercept=self.chk_router.isChecked(), router_include_hash=self.chk_route_hash.isChecked(), router_max_routes=self.spin_router_max.value(), router_settle_ms=self.spin_router_settle.value(), router_wait_selector=self.router_wait_sel.text().strip() or None,
             router_allow=[p.strip() for p in self.router_allow.text().split(',') if p.strip()] or None, router_deny=[p.strip() for p in self.router_deny.text().split(',') if p.strip()] or None, router_quiet=self.chk_router_quiet.isChecked(),
