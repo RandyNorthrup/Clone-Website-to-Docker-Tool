@@ -654,7 +654,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             QMessageBox.warning(self,'Load Failed', str(e))
 
     # ------------------- Wizard (Recommendation) -------------------
-    def _scan_site_features(self, url: str, timeout: float = 6.0) -> dict:
+    @staticmethod
+    def _scan_site_features(url: str, timeout: float = 6.0) -> dict:
         """Fetch root page and run lightweight heuristics to recommend settings.
         Extended Heuristics:
           - Framework markers (react/vue/angular/next/nuxt/svelte) or hydration markers => prerender + router intercept.
@@ -750,7 +751,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             return
         # Inner function to gather extended analysis (can be moved to thread)
         def _extended_analysis(u: str):
-            info=self._scan_site_features(u)
+            info=DockerClonerGUI._scan_site_features(u)
             # Add spider estimate (best effort)
             try:
                 from cw2dt_core import estimate_site_items
