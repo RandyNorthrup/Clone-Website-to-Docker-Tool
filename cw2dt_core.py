@@ -693,7 +693,11 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
                     dom_stable_pages += 1
             html = page.content();
             if rewrite_urls and origin:
-                html = html.replace(origin, '')
+                # Replace full absolute origin with root-only relative links (preserve leading slash)
+                try:
+                    html = html.replace(origin+'/', '/').replace(origin, '/')
+                except Exception:
+                    pass
             # Normalize internal href/src links for strict mode so saved filenames resolve.
             # (If running outside full clone context and cfg not visible, default to strict normalization.)
             routing_mode = 'strict'
@@ -1763,8 +1767,8 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 internal_hosts.add('www.'+origin_host)
             # helper regex for attributes (href/src/action) & CSS url()
             import re as _re
-            attr_pattern=_re.compile(r'(href|src|action)=("|\')(https?:)?//([^/\">\']+)(/[^\"\'> ]*)?("|\')', _re.IGNORECASE)
-            css_url_pattern=_re.compile(r'url\(("|\')?(https?:)?//([^/\)"\']+)(/[^\)"\']*)("|\')?\)', _re.IGNORECASE)
+            attr_pattern=_re.compile(r'(href|src|action)=("|\')(?:https?:)?//([^/\"\'>]+)(/[^\"\'> ]*)?("|\')', _re.IGNORECASE)
+            css_url_pattern=_re.compile(r'url\(("|\')?(?:https?:)?//([^/\)"\']+)(/[^\)"\']*)("|\')?\)', _re.IGNORECASE)
             for base,_,files in os.walk(site_root):
                 for fn in files:
                     if not fn.lower().endswith(('.html','.htm','.css')): continue
@@ -1775,16 +1779,16 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                         continue
                     original=txt
                     def _attr_sub(m):
-                        full_host=m.group(4).lower()
-                        path=m.group(5) or '/'
+                        full_host=m.group(3).lower()
+                        path=m.group(4) or '/'
                         if full_host in internal_hosts:
-                            repl=f"{m.group(1)}={m.group(2)}{path}{m.group(6)}"
+                            repl=f"{m.group(1)}={m.group(2)}{path}{m.group(5)}"
                             rewrite_internal_links_stats['rewritten']+=1
                             return repl
                         return m.group(0)
                     txt=attr_pattern.sub(_attr_sub, txt)
                     def _css_sub(m):
-                        full_host=m.group(3).lower(); path=m.group(4) or '/'
+                        full_host=m.group(2).lower(); path=m.group(3) or '/'
                         if full_host in internal_hosts:
                             rewrite_internal_links_stats['rewritten']+=1
                             return f"url({path})"
