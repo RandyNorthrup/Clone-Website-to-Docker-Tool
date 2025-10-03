@@ -16,7 +16,7 @@ from PySide6.QtGui import QPixmap, QIcon
 
 from cw2dt_core import (
     validate_required_fields, is_wget2_available, docker_available,
-    port_in_use, CloneConfig, clone_site, CloneCallbacks, image_exists_locally
+    port_in_use, CloneConfig, CloneResult, clone_site, CloneCallbacks, image_exists_locally
 )
 
 class _GuiCallbacks(CloneCallbacks):
@@ -234,8 +234,8 @@ class DockerClonerGUI(QWidget):
         row2=QHBoxLayout(); row2.setSpacing(6)
         self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
         self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); row2.addWidget(self.btn_serve)
-    self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
-    self.btn_use_existing=QPushButton('Use Existing Folder'); row2.addWidget(self.btn_use_existing)
+        self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
+        self.btn_use_existing=QPushButton('Use Existing Folder'); row2.addWidget(self.btn_use_existing)
         self.btn_deps=QPushButton('Dependencies'); row2.addWidget(self.btn_deps)
         self.btn_save_cfg=QPushButton('Save Config'); row2.addWidget(self.btn_save_cfg)
         self.btn_load_cfg=QPushButton('Load Config'); row2.addWidget(self.btn_load_cfg)
@@ -264,8 +264,8 @@ class DockerClonerGUI(QWidget):
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self.btn_wizard.clicked.connect(self._run_wizard)
-    self.btn_build_now.clicked.connect(self._build_now)
-    self.btn_use_existing.clicked.connect(self._use_existing_folder)
+        self.btn_build_now.clicked.connect(self._build_now)
+        self.btn_use_existing.clicked.connect(self._use_existing_folder)
         self.btn_copy_addr.clicked.connect(self._copy_address)
         self.btn_open_addr.clicked.connect(self._open_address)
         # Dynamic interlocks
@@ -1554,23 +1554,42 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             # Infer docker name: use current text or folder name
             name=self.name_in.text().strip() or os.path.basename(path.rstrip(os.sep)) or 'site'
             self.name_in.setText(name)
-            # Create a lightweight result-like stub
-            class _Stub: pass
-            stub=_Stub()
-            stub.success=True
-            stub.output_folder=path
-            stub.site_root=path
-            stub.docker_built=image_exists_locally(name)
-            self._last_result=stub
+            # Determine if image already exists
+            already_built=image_exists_locally(name)
+            # Try to locate manifest if present (non-fatal if absent)
+            manifest_path=None
+            mp=os.path.join(path,'clone_manifest.json')
+            if os.path.exists(mp):
+                manifest_path=mp
+            # Create a proper CloneResult so downstream code & type checkers are satisfied
+            try:
+                self._last_result=CloneResult(
+                    success=True,
+                    docker_built=already_built,
+                    output_folder=path,
+                    site_root=path,
+                    manifest_path=manifest_path,
+                    diff_summary=None,
+                    timings={},
+                    run_id=None
+                )
+            except Exception:
+                # Fallback: mimic minimal attributes if instantiation fails unexpectedly
+                class _Fallback:
+                    success=True
+                    docker_built=already_built
+                    output_folder=path
+                    site_root=path
+                self._last_result=_Fallback()
             self.dest_in.setText(os.path.dirname(path))
             # Enable relevant buttons
             self.btn_build_now.setEnabled(True)
             self.btn_serve.setEnabled(True)
-            if stub.docker_built:
+            if getattr(self._last_result,'docker_built',False):
                 self.btn_run_docker.setEnabled(True)
             self._update_url_action_buttons(container_started=False)
             self.console.append(f"[gui] adopted existing folder: {path}")
-            if not stub.docker_built and has_docker:
+            if (not getattr(self._last_result,'docker_built',False)) and has_docker:
                 self.console.append('[hint] Dockerfile present but image not built – click Build Now to build it.')
             if not has_docker:
                 self.console.append('[hint] No Dockerfile found; enable Build Docker image and run a fresh clone if you need a container, or just use Serve Folder.')
