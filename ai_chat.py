@@ -121,9 +121,9 @@ class ChatAssistantDialog(QDialog):
         self._transcript_path=None
         self._last_changes=None
         self._last_risks={}
-    self._consec_stream_errors=0
-    self._dynamic_free_models=list(FREE_MODELS)
-    self._build_ui()
+        self._consec_stream_errors=0
+        self._dynamic_free_models=list(FREE_MODELS)
+        self._build_ui()
         self._start_background_poller()
 
     # ---------- UI ----------
@@ -143,7 +143,7 @@ class ChatAssistantDialog(QDialog):
         self.btn_refresh_models.clicked.connect(self._refresh_models_clicked)
         self.chk_auto=QCheckBox('Watch Mode (periodic log analysis)')
         self.btn_analyze=QPushButton('Analyze Recent Logs'); self.btn_analyze.clicked.connect(self._analyze_logs)
-    top.addWidget(QLabel('Model:')); top.addWidget(self.model_box,1); top.addWidget(self.btn_refresh_models); top.addWidget(self.chk_auto); top.addWidget(self.btn_analyze)
+        top.addWidget(QLabel('Model:')); top.addWidget(self.model_box,1); top.addWidget(self.btn_refresh_models); top.addWidget(self.chk_auto); top.addWidget(self.btn_analyze)
         lay.addLayout(top)
         self.chat_view=QTextEdit(); self.chat_view.setReadOnly(True); lay.addWidget(self.chat_view,1)
         inrow=QHBoxLayout(); self.input=QLineEdit(); self.input.setPlaceholderText('Ask a question or: suggest dynamic settings')
