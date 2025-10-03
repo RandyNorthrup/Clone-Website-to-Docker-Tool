@@ -694,6 +694,31 @@ def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages
             html = page.content();
             if rewrite_urls and origin:
                 html = html.replace(origin, '')
+            # Normalize internal href/src links for strict mode so saved filenames resolve.
+            # (If running outside full clone context and cfg not visible, default to strict normalization.)
+            routing_mode = 'strict'
+            if routing_mode == 'strict':
+                try:
+                    import re as _re
+                    # Only adjust internal absolute-path links (start with /) so they match saved filenames
+                    def _norm_path(p: str) -> str:
+                        if not p.startswith('/'):
+                            return p
+                        if p.endswith('/') or p == '/':
+                            return (p.rstrip('/') + '/index.html') if p != '/' else '/index.html'
+                        last = p.rsplit('/',1)[-1]
+                        if '.' not in last:  # extensionless -> add .html
+                            return p + '.html'
+                        return p
+                    def _rewrite_attr(m):
+                        attr, quote, path, tail = m.group(1), m.group(2), m.group(3), m.group(4) or ''
+                        new_path = _norm_path(path)
+                        return f"{attr}={quote}{new_path}{tail}{quote}"
+                    # Pattern captures href|src="/path[optional ?# tail]"
+                    html = _re.sub(r'(href|src)=("|\')(/[^"\'#? ]*)([?#][^"\']*)?("|\')',
+                                   lambda m: _rewrite_attr((m.group(1), m.group(2), m.group(3), m.group(4))), html)
+                except Exception:
+                    pass
             rel='index.html'
             try:
                 up=urlparse(url); rel=up.path
