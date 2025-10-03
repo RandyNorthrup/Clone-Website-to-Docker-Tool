@@ -33,7 +33,7 @@ OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
 
 # Curated list of models advertised as free / zero‑cost (subject to change on OpenRouter).
 # Only these will be offered in the UI to avoid accidental cost incursion. Update manually as needed.
-FREE_MODELS = [
+FREE_MODELS = [  # Static fallback seeds (used if live fetch fails)
     'meta-llama/llama-3-8b-instruct',
     'mistralai/mistral-7b-instruct',
     'google/gemma-2-9b-it',
@@ -121,23 +121,29 @@ class ChatAssistantDialog(QDialog):
         self._transcript_path=None
         self._last_changes=None
         self._last_risks={}
-        self._build_ui()
+    self._consec_stream_errors=0
+    self._dynamic_free_models=list(FREE_MODELS)
+    self._build_ui()
         self._start_background_poller()
 
     # ---------- UI ----------
     def _build_ui(self):
         lay=QVBoxLayout(self); lay.setContentsMargins(8,8,8,8); lay.setSpacing(6)
         top=QHBoxLayout(); top.setSpacing(8)
-        self.model_box=QComboBox(); self.model_box.addItems(FREE_MODELS)
+        self.model_box=QComboBox(); self.model_box.addItems(self._dynamic_free_models)
         # Ensure currently selected fallback is the validated DEFAULT_MODEL
         try:
             idx=self.model_box.findText(DEFAULT_MODEL)
             if idx>=0: self.model_box.setCurrentIndex(idx)
         except Exception:
             pass
+        # Refresh models button (dynamic fetch of current free list)
+        self.btn_refresh_models=QPushButton('Refresh Models')
+        self.btn_refresh_models.setToolTip('Fetch current free models list from OpenRouter (filters zero-cost entries).')
+        self.btn_refresh_models.clicked.connect(self._refresh_models_clicked)
         self.chk_auto=QCheckBox('Watch Mode (periodic log analysis)')
         self.btn_analyze=QPushButton('Analyze Recent Logs'); self.btn_analyze.clicked.connect(self._analyze_logs)
-        top.addWidget(QLabel('Model:')); top.addWidget(self.model_box,1); top.addWidget(self.chk_auto); top.addWidget(self.btn_analyze)
+    top.addWidget(QLabel('Model:')); top.addWidget(self.model_box,1); top.addWidget(self.btn_refresh_models); top.addWidget(self.chk_auto); top.addWidget(self.btn_analyze)
         lay.addLayout(top)
         self.chat_view=QTextEdit(); self.chat_view.setReadOnly(True); lay.addWidget(self.chat_view,1)
         inrow=QHBoxLayout(); self.input=QLineEdit(); self.input.setPlaceholderText('Ask a question or: suggest dynamic settings')
@@ -162,6 +168,58 @@ class ChatAssistantDialog(QDialog):
     def _toggle_stream(self, enabled: bool):
         self._streaming_enabled=enabled
         self._set_status('Streaming ON' if enabled else 'Streaming OFF')
+
+    # ---------- Model Refresh ----------
+    def _refresh_models_clicked(self):
+        api_key=self._api_key_getter() or os.getenv('OPENROUTER_API_KEY')
+        if not api_key:
+            self._log('[ai] cannot refresh models – no API key')
+            return
+        threading.Thread(target=self._refresh_free_models, args=(api_key,), daemon=True).start()
+
+    def _refresh_free_models(self, api_key: str):
+        """Fetch current models list, keep only zero-cost ones, update UI (best effort)."""
+        try:
+            headers={'Authorization':f'Bearer {api_key}','HTTP-Referer':'http://localhost/','X-Title':'CW2DT Chat'}
+            with httpx.Client(timeout=30) as client:
+                resp=client.get('https://openrouter.ai/api/v1/models', headers=headers)
+            if resp.status_code!=200:
+                self._log(f'[ai] model refresh failed HTTP {resp.status_code}')
+                return
+            js=resp.json()
+            data=js.get('data') or []
+            free=[]
+            for item in data:
+                if not isinstance(item,dict):
+                    continue
+                mid=item.get('id') or item.get('name')
+                pricing=item.get('pricing') or {}
+                # Heuristic: treat model as free if prompt / completion price are 0 or missing
+                try:
+                    prompt_cost=float(str(pricing.get('prompt','0')).split()[0] or 0)
+                    comp_cost=float(str(pricing.get('completion','0')).split()[0] or 0)
+                except Exception:
+                    prompt_cost=comp_cost=0
+                if mid and prompt_cost==0 and comp_cost==0:
+                    free.append(mid)
+            if not free:
+                self._log('[ai] model refresh yielded no zero-cost entries; keeping existing list')
+                return
+            # Preserve currently selected if still present
+            cur=self.model_box.currentText().strip()
+            self._dynamic_free_models=free
+            def _apply():
+                self.model_box.blockSignals(True)
+                self.model_box.clear(); self.model_box.addItems(self._dynamic_free_models)
+                if cur in self._dynamic_free_models:
+                    self.model_box.setCurrentText(cur)
+                else:
+                    self.model_box.setCurrentIndex(0)
+                self.model_box.blockSignals(False)
+                self._log(f'[ai] refreshed free models ({len(free)}): '+', '.join(self._dynamic_free_models[:6]) + (' …' if len(free)>6 else ''))
+            QTimer.singleShot(0,_apply)
+        except Exception as e:
+            self._log(f'[ai] model refresh error: {e}')
 
     def _resolve_transcript_path(self):
         if self._transcript_path: return self._transcript_path
@@ -230,7 +288,8 @@ class ChatAssistantDialog(QDialog):
     def _run_analysis(self, user_prompt: Optional[str], system_inject: Optional[str]=None):
         cfg, ctx_text=self._compose_context()
         model=self.model_box.currentText().strip() or DEFAULT_MODEL
-        if model not in FREE_MODELS:
+        allowed=set(self._dynamic_free_models or FREE_MODELS)
+        if model not in allowed:
             # Hard guard: force back to DEFAULT_MODEL if somehow out-of-band value slips in
             model = DEFAULT_MODEL
             try: self._log('[system] model outside free allowlist; reverted to '+model)
@@ -287,6 +346,35 @@ class ChatAssistantDialog(QDialog):
                                 self._process_response('[error] 402 on primary model and no alternate free model produced a response.')
                             return
                         else:
+                            # 400/404 often indicate removed or invalid model id – rotate similar to 402 path
+                            if status in (400,404):
+                                try: self._log(f'[ai] streaming HTTP {status} for model {model}; trying alternate…')
+                                except Exception: pass
+                                rotated=False
+                                for alt in (m for m in self._dynamic_free_models if m!=model):
+                                    try:
+                                        payload_alt={'model':alt,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}], 'temperature':0.2,'max_tokens':600}
+                                        with httpx.Client(timeout=45) as c2:
+                                            resp2=c2.post(OPENROUTER_API,json=payload_alt,headers=headers)
+                                            if resp2.status_code==200:
+                                                data=resp2.json(); content=data.get('choices',[{}])[0].get('message',{}).get('content','')
+                                                if content:
+                                                    self._log(f'[ai] switched to alternate (due to {status}): {alt}')
+                                                    self._process_response(content)
+                                                    rotated=True
+                                                    break
+                                    except Exception:
+                                        continue
+                                if not rotated:
+                                    # Attempt non-stream fallback with original model to capture body error details
+                                    try:
+                                        with httpx.Client(timeout=45) as fcli:
+                                            fresp=fcli.post(OPENROUTER_API,json={'model':model,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}],'temperature':0.2,'max_tokens':600},headers=headers)
+                                            detail=fresp.text[:800]
+                                            self._process_response(f'[error] streaming HTTP {status} (detail: {detail})')
+                                    except Exception:
+                                        self._process_response(f'[error] streaming HTTP {status}')
+                                return
                             self._process_response(f'[error] streaming HTTP {status}')
                             return
                     for raw in r.iter_lines():
@@ -336,6 +424,15 @@ class ChatAssistantDialog(QDialog):
             self._process_response(final)
         except Exception as e:
             self._process_response(f'[error] streaming failed: {e}')
+            self._consec_stream_errors+=1
+            if self._consec_stream_errors>=3 and self._streaming_enabled:
+                # Auto-disable streaming after repeated failures
+                self._streaming_enabled=False
+                try: self._log('[ai] auto-disabled streaming after repeated failures')
+                except Exception: pass
+        else:
+            # Reset error counter on success path
+            self._consec_stream_errors=0
 
     def _process_response(self, text: str):
         changes=parse_ai_changes(text)
