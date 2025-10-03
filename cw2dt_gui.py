@@ -418,7 +418,12 @@ class DockerClonerGUI(QWidget):
         tools=self.menubar.addMenu('&Tools')
         act_wizard=QAction('Wizard', self); act_wizard.triggered.connect(self._run_wizard); tools.addAction(act_wizard)
         act_deps=QAction('Dependencies', self); act_deps.triggered.connect(self._show_deps_dialog); tools.addAction(act_deps)
-        tools.addSeparator(); act_diag=QAction('Diagnose Last Error', self); act_diag.triggered.connect(self._run_diagnostics); tools.addAction(act_diag)
+        # New: Set / Persist OpenRouter API Key
+        act_api_key=QAction('Set OpenRouter API Key', self)
+        act_api_key.triggered.connect(self._prompt_set_api_key)
+        tools.addAction(act_api_key)
+        tools.addSeparator()
+        act_diag=QAction('Diagnose Last Error', self); act_diag.triggered.connect(self._run_diagnostics); tools.addAction(act_diag)
         help_m=self.menubar.addMenu('&Help')
         act_help=QAction('Help Contents', self); act_help.triggered.connect(self._open_help); help_m.addAction(act_help)
         act_index=QAction('Feature Index', self); act_index.triggered.connect(lambda: self._open_help(show_index=True)); help_m.addAction(act_index)
@@ -456,7 +461,13 @@ class DockerClonerGUI(QWidget):
             # Prefer AI endpoint key field if set, else OPENROUTER_API_KEY env
             if hasattr(self,'ai_api_key_in') and self.ai_api_key_in.text().strip():
                 return self.ai_api_key_in.text().strip()
-            return None
+            # Fallback: loaded persisted key if present
+            try:
+                if getattr(self,'_persisted_ai_key',None):
+                    return self._persisted_ai_key
+            except Exception:
+                pass
+            return os.getenv('OPENROUTER_API_KEY')
         self._ai_chat_dialog=ChatAssistantDialog(self,_cfg_snapshot,_logs_snapshot,_api_key,self)
         self._ai_chat_dialog.show()
 
@@ -563,6 +574,67 @@ class DockerClonerGUI(QWidget):
 
     def _connect_signals(self):
         self.sig_log.connect(self._on_log); self.sig_phase.connect(self._on_phase); self.sig_bandwidth.connect(lambda r: self._update_metric(rate=r)); self.sig_api.connect(lambda n: self._update_metric(api=n)); self.sig_router.connect(lambda n: self._update_metric(router=n)); self.sig_checksum.connect(lambda p: self._update_metric(chk=p))
+        # Attempt to auto-load persisted AI key once signals are wired (console ready)
+        self._load_persisted_api_key()
+
+    # ------------------- API Key Persistence -------------------
+    def _api_key_store_path(self):
+        try:
+            base=os.path.join(os.path.expanduser('~'), '.cw2dt')
+            os.makedirs(base, exist_ok=True)
+            return os.path.join(base,'ai_key.json')
+        except Exception:
+            return None
+
+    def _load_persisted_api_key(self):
+        path=self._api_key_store_path()
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path,'r',encoding='utf-8') as f:
+                data=json.load(f)
+            key=data.get('openrouter_api_key') or ''
+            if key:
+                self._persisted_ai_key=key
+                # Populate field only if user hasn't typed anything yet
+                if hasattr(self,'ai_api_key_in') and not self.ai_api_key_in.text().strip():
+                    self.ai_api_key_in.setText(key)
+                self._on_log('[ai] loaded persisted OpenRouter API key (hidden)')
+        except Exception:
+            pass
+
+    def _prompt_set_api_key(self):
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        current=getattr(self,'_persisted_ai_key', '') or (self.ai_api_key_in.text().strip() if hasattr(self,'ai_api_key_in') else '')
+        key, ok = QInputDialog.getText(self, 'OpenRouter API Key', 'Enter / update your OpenRouter API key:', echo=QLineEdit.EchoMode.Password, text=current)
+        if not ok:
+            return
+        key=key.strip()
+        if not key:
+            QMessageBox.information(self,'API Key','Cleared stored key.')
+            self._persisted_ai_key=''
+            if hasattr(self,'ai_api_key_in'): self.ai_api_key_in.setText('')
+            path=self._api_key_store_path();
+            try:
+                if path and os.path.isfile(path): os.remove(path)
+            except Exception: pass
+            return
+        # Basic format sanity (OpenRouter keys often start with sk- or sk-or-)
+        if not key.startswith('sk-'):
+            resp=QMessageBox.question(self,'Confirm','Key does not start with sk-; save anyway?')
+            if resp!=QMessageBox.StandardButton.Yes:
+                return
+        self._persisted_ai_key=key
+        if hasattr(self,'ai_api_key_in'): self.ai_api_key_in.setText(key)
+        path=self._api_key_store_path()
+        if path:
+            try:
+                with open(path,'w',encoding='utf-8') as f: json.dump({'openrouter_api_key': key}, f)
+                self._on_log('[ai] API key stored locally (plaintext)')
+            except Exception:
+                QMessageBox.warning(self,'Error','Failed to persist key to disk.')
+        else:
+            QMessageBox.warning(self,'Error','No writable location for key persistence.')
 
     def _apply_tooltips(self):  # Centralized tooltips for clarity & maintainability
         tt={
