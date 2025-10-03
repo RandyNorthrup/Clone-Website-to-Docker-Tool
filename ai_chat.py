@@ -30,7 +30,20 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 
 OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+# Curated list of models advertised as free / zero‑cost (subject to change on OpenRouter).
+# Only these will be offered in the UI to avoid accidental cost incursion. Update manually as needed.
+FREE_MODELS = [
+    'meta-llama/llama-3-8b-instruct',
+    'mistralai/mistral-7b-instruct',
+    'google/gemma-2-9b-it',
+    'qwen/qwen2-7b-instruct',
+    'openchat/openchat-7b'
+]
+
+# Environment override is honored ONLY if inside FREE_MODELS; otherwise we fall back to first free model.
+_env_model = os.getenv("OPENROUTER_MODEL", "").strip()
+DEFAULT_MODEL = _env_model if _env_model in FREE_MODELS else FREE_MODELS[0]
 
 WHITELIST = {
     'prerender','router_intercept','resilient','relaxed_tls','allow_degraded','incremental','capture_api','capture_storage',
@@ -115,9 +128,13 @@ class ChatAssistantDialog(QDialog):
     def _build_ui(self):
         lay=QVBoxLayout(self); lay.setContentsMargins(8,8,8,8); lay.setSpacing(6)
         top=QHBoxLayout(); top.setSpacing(8)
-        self.model_box=QComboBox(); self.model_box.addItems([
-            DEFAULT_MODEL,'anthropic/claude-3.5-haiku','google/gemini-flash-1.5','openai/gpt-4o-mini'
-        ])
+        self.model_box=QComboBox(); self.model_box.addItems(FREE_MODELS)
+        # Ensure currently selected fallback is the validated DEFAULT_MODEL
+        try:
+            idx=self.model_box.findText(DEFAULT_MODEL)
+            if idx>=0: self.model_box.setCurrentIndex(idx)
+        except Exception:
+            pass
         self.chk_auto=QCheckBox('Watch Mode (periodic log analysis)')
         self.btn_analyze=QPushButton('Analyze Recent Logs'); self.btn_analyze.clicked.connect(self._analyze_logs)
         top.addWidget(QLabel('Model:')); top.addWidget(self.model_box,1); top.addWidget(self.chk_auto); top.addWidget(self.btn_analyze)
@@ -213,6 +230,11 @@ class ChatAssistantDialog(QDialog):
     def _run_analysis(self, user_prompt: Optional[str], system_inject: Optional[str]=None):
         cfg, ctx_text=self._compose_context()
         model=self.model_box.currentText().strip() or DEFAULT_MODEL
+        if model not in FREE_MODELS:
+            # Hard guard: force back to DEFAULT_MODEL if somehow out-of-band value slips in
+            model = DEFAULT_MODEL
+            try: self._log('[system] model outside free allowlist; reverted to '+model)
+            except Exception: pass
         api_key=self._api_key_getter() or os.getenv('OPENROUTER_API_KEY')
         if not api_key:
             self._log('[error] No API key (set OPENROUTER_API_KEY env or fill AI API Key field).'); return

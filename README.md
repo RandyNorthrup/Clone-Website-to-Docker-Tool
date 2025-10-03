@@ -10,11 +10,25 @@ A desktop + CLI utility to clone public or private websites using **wget2** (par
 >
 > The legacy monolith is preserved as `cw2dt_working.py` for historical reference only (no new features). Future enhancements will target the modular architecture.
 
----
-
 ## Features
+### AI Chat – Free Model Policy
 
-- **Point-and-click cloning** (GUI) + full-featured **headless CLI**
+To avoid accidental usage-based charges, the embedded AI Chat Assistant restricts selection to a curated allow‑list of models that OpenRouter currently advertises as free (zero cost tiers). The UI only presents these models; any environment override (`OPENROUTER_MODEL`) is honored only if it is also in the allow‑list. If an out‑of‑band model name is injected (e.g. via a modified settings file), the dialog automatically falls back to the first free model.
+
+Current allow‑list (update manually in `ai_chat.py` as offerings evolve):
+
+```text
+meta-llama/llama-3-8b-instruct
+mistralai/mistral-7b-instruct
+google/gemma-2-9b-it
+qwen/qwen2-7b-instruct
+openchat/openchat-7b
+```
+
+If OpenRouter changes availability or introduces new free tiers you want to use, just add them to `FREE_MODELS` in `ai_chat.py` and (optionally) submit a PR. Paid / rate‑metered premium models are intentionally excluded to maintain a cost‑safe default experience.
+
+Risk heuristics still apply regardless of model (e.g. warning on large thread jumps or relaxed TLS toggles). Transcript logging (optional) redacts bearer tokens before writing.
+
 - **wget2** engine: fast, parallel, resumable, convert-links, page requisites
 - **Authenticated cloning**:
   - HTTP Basic (user / password)
@@ -49,7 +63,7 @@ A desktop + CLI utility to clone public or private websites using **wget2** (par
   - Save / Load configuration profiles (reusable loadouts)
 - **Cross-platform**: macOS, Linux, Windows
 - **Fail-soft optional features**: prerender gracefully skipped if Playwright not installed
-- **AI Chat Assistant**: Streaming OpenRouter-powered guidance with watch mode, risk heuristics, transcript logging, and diff preview selective apply (whitelist enforced)
+- **AI Chat Assistant**: Streaming guidance (OpenRouter) using only a curated set of free models (cost‑safe), with watch mode, risk heuristics, transcript logging, and diff preview selective apply (whitelist enforced)
 
 ---
 
