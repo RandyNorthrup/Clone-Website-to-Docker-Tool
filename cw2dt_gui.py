@@ -130,7 +130,10 @@ class DockerClonerGUI(QWidget):
         form.addWidget(QLabel('Container Port:'),r,0); self.cont_port=QSpinBox(); self.cont_port.setRange(1,65535); self.cont_port.setValue(80); form.addWidget(self.cont_port,r,1)
         basic.addLayout(form); config_v.addWidget(basic)
         # Clone options
-        clone=_CollapsibleBox('Clone Options'); self._sections.append(clone); self.chk_build=QCheckBox('Build Docker image'); self.chk_run_built=QCheckBox('Run built image'); self.chk_serve=QCheckBox('Serve folder via nginx:alpine'); self.chk_open_browser=QCheckBox('Open browser after start'); self.chk_incremental=QCheckBox('Incremental (-N)'); self.chk_diff=QCheckBox('Diff vs last state'); self.chk_estimate_first=QCheckBox('Estimate before clone'); self.chk_cleanup=QCheckBox('Cleanup build artifacts')
+        clone=_CollapsibleBox('Clone Options'); self._sections.append(clone)
+        self.chk_build=QCheckBox('Build Docker image'); self.chk_run_built=QCheckBox('Run built image'); self.chk_serve=QCheckBox('Serve folder via nginx:alpine'); self.chk_open_browser=QCheckBox('Open browser after start'); self.chk_incremental=QCheckBox('Incremental (-N)'); self.chk_diff=QCheckBox('Diff vs last state'); self.chk_estimate_first=QCheckBox('Estimate before clone'); self.chk_cleanup=QCheckBox('Cleanup build artifacts')
+        self.routing_mode_box=QComboBox(); self.routing_mode_box.addItems(['strict','spa','ext','hybrid']); self.routing_mode_box.setToolTip('Routing strategy for generated nginx config: strict(=404), spa(fallback index.html), ext(extensionless .html), hybrid(ext then SPA).')
+        rm_lay=QHBoxLayout(); rm_lay.addWidget(QLabel('Routing Mode:')); rm_lay.addWidget(self.routing_mode_box); clone.addLayout(rm_lay)
         for w in (self.chk_build,self.chk_run_built,self.chk_serve,self.chk_open_browser,self.chk_incremental,self.chk_diff,self.chk_estimate_first,self.chk_cleanup): clone.addWidget(w)
         config_v.addWidget(clone)
         # Dynamic
@@ -616,7 +619,8 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'bind_ip': self.ip_in.text().strip(), 'host_port': self.host_port.value(), 'container_port': self.cont_port.value(),
             'build': self.chk_build.isChecked(), 'run_built': self.chk_run_built.isChecked(), 'serve_folder': self.chk_serve.isChecked(),
             'open_browser': self.chk_open_browser.isChecked(), 'incremental': self.chk_incremental.isChecked(), 'diff': self.chk_diff.isChecked(),
-            'estimate_first': self.chk_estimate_first.isChecked(), 'cleanup': self.chk_cleanup.isChecked(),
+            'estimate_first': self.chk_estimate_first.isChecked(), 'cleanup': self.chk_cleanup.isChecked(), 'routing_mode': self.routing_mode_box.currentText(),
+            'routing_mode': self.routing_mode_box.currentText(),
             'prerender': self.chk_prerender.isChecked(), 'prerender_max_pages': self.spin_prer_pages.value(), 'capture_api': self.chk_capture_api.isChecked(), 'hook_script': self.hook_in.text().strip(),
             'prerender_scroll': self.spin_prer_scroll.value(), 'capture_graphql': self.chk_capture_graphql.isChecked(),
             'dom_stable_ms': self.spin_dom_stable.value(), 'dom_stable_timeout_ms': self.spin_dom_stable_timeout.value(),
@@ -651,6 +655,16 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             self.chk_diff.setChecked(bool(data.get('diff')))
             self.chk_estimate_first.setChecked(bool(data.get('estimate_first')))
             self.chk_cleanup.setChecked(bool(data.get('cleanup')))
+            try:
+                rm=data.get('routing_mode','strict')
+                idx=self.routing_mode_box.findText(rm)
+                if idx>=0: self.routing_mode_box.setCurrentIndex(idx)
+            except Exception: pass
+            try:
+                rm=data.get('routing_mode','strict')
+                idx=self.routing_mode_box.findText(rm)
+                if idx>=0: self.routing_mode_box.setCurrentIndex(idx)
+            except Exception: pass
             self.chk_prerender.setChecked(bool(data.get('prerender')))
             self.spin_prer_pages.setValue(int(data.get('prerender_max_pages',40)))
             try: self.spin_prer_scroll.setValue(int(data.get('prerender_scroll',0)))
@@ -984,7 +998,7 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             auto_backoff=self.chk_auto_backoff.isChecked() if hasattr(self,'chk_auto_backoff') else False,
             log_redirect_chain=self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
             save_wget_stderr=self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
-            ,insecure=self.chk_insecure_tls.isChecked() if hasattr(self,'chk_insecure_tls') else False
+            ,insecure=self.chk_insecure_tls.isChecked() if hasattr(self,'chk_insecure_tls') else False, routing_mode=self.routing_mode_box.currentText()
         )
         setattr(cfg,'cleanup', self.chk_cleanup.isChecked())
         return cfg

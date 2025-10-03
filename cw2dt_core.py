@@ -913,6 +913,7 @@ class CloneConfig:
     log_redirect_chain: bool = False        # preflight and log redirect chain before clone
     save_wget_stderr: bool = False          # persist full wget2 stderr to file for diagnostics
     insecure: bool = False                  # ignore TLS certificate validation (diagnostic / insecure)
+    routing_mode: str = 'strict'            # 'strict' | 'spa' | 'ext' | 'hybrid'
     # internal cancellation hook (GUI injects)
     cancel_event: Any = None
     # internal / reserved
@@ -1733,7 +1734,21 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         parts=['server {\n', f'    listen {int(cfg.container_port)};\n','    server_name localhost;\n','    root /usr/share/nginx/html;\n','    index index.html;\n']
         if cfg.disable_js:
             parts.append('    add_header Content-Security-Policy "script-src \'none\'; frame-src \'none\'" always;\n')
-        parts.append('    location / { try_files $uri $uri/ =404; }\n'); parts.append('}\n'); f.write(''.join(parts))
+        # Routing modes:
+        # strict: 404 on missing files (current behavior)
+        # spa: fallback all unknown paths to /index.html
+        # ext: attempt extensionless -> add .html (e.g., /about -> /about.html) else 404
+        # hybrid: extensionless first, then SPA fallback
+        rm=(getattr(cfg,'routing_mode','strict') or 'strict').lower()
+        if rm=='spa':
+            parts.append('    location / { try_files $uri $uri/ /index.html; }\n')
+        elif rm=='ext':
+            parts.append('    location / { try_files $uri $uri/ $uri.html =404; }\n')
+        elif rm=='hybrid':
+            parts.append('    location / { try_files $uri $uri/ $uri.html /index.html; }\n')
+        else:  # strict
+            parts.append('    location / { try_files $uri $uri/ =404; }\n')
+        parts.append('}\n'); f.write(''.join(parts))
     # Validate nginx.conf correctness (structure & key directives)
     try:
         conf_path=os.path.join(output_folder,'nginx.conf')
@@ -1745,18 +1760,25 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         _expect(f"listen {int(cfg.container_port)};","listen directive")
         _expect('root /usr/share/nginx/html;','root directive')
         _expect('index index.html;','index directive')
-        _expect('location / { try_files $uri $uri/ =404; }','location try_files rule')
+        rm=(getattr(cfg,'routing_mode','strict') or 'strict').lower()
+        expected_map={
+            'strict':'location / { try_files $uri $uri/ =404; }',
+            'spa':'location / { try_files $uri $uri/ /index.html; }',
+            'ext':'location / { try_files $uri $uri/ $uri.html =404; }',
+            'hybrid':'location / { try_files $uri $uri/ $uri.html /index.html; }'
+        }
+        _expect(expected_map.get(rm, expected_map['strict']),'location try_files rule')
         if cfg.disable_js and 'Content-Security-Policy' not in conf_txt:
             warnings.append('CSP header expected (disable_js enabled)')
         if not issues and not warnings:
             log('[nginx] config validated')
-            j('nginx_validation', ok=True)
+            j('nginx_validation', ok=True, routing_mode=rm)
         else:
             if issues:
                 log('[nginx] validation issues: ' + '; '.join(issues))
             if warnings:
                 log('[nginx] validation warnings: ' + '; '.join(warnings))
-            j('nginx_validation', ok=not issues, issues=issues or None, warnings=warnings or None)
+            j('nginx_validation', ok=not issues, issues=issues or None, warnings=warnings or None, routing_mode=rm)
     except Exception as e:  # non-fatal
         try:
             log(f"[nginx] validation skipped: {e}")
@@ -1804,12 +1826,21 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         conf_path=os.path.join(site_root,f'.folder.default.{cont_p}.conf')
         try:
             with open(conf_path,'w',encoding='utf-8') as f:
+                rm=(getattr(cfg,'routing_mode','strict') or 'strict').lower()
+                if rm=='spa':
+                    loc='    location / { try_files $uri $uri/ /index.html; }\n'
+                elif rm=='ext':
+                    loc='    location / { try_files $uri $uri/ $uri.html =404; }\n'
+                elif rm=='hybrid':
+                    loc='    location / { try_files $uri $uri/ $uri.html /index.html; }\n'
+                else:
+                    loc='    location / { try_files $uri $uri/ =404; }\n'
                 f.write('server {\n'
                         f'    listen {cont_p};\n'
                         '    server_name localhost;\n'
                         '    root /usr/share/nginx/html;\n'
                         '    index index.html;\n'
-                        '    location / { try_files $uri $uri/ =404; }\n' '}' '\n')
+                        f'{loc}' '}' '\n')
         except Exception as e:
             log(f'[serve] config failed: {e}')
         cmd=['docker','run','-d','-p', f'{bind_ip}:{host_p}:{cont_p}','-v', f'{site_root}:/usr/share/nginx/html','-v', f'{conf_path}:/etc/nginx/conf.d/default.conf:ro','nginx:alpine']
@@ -2035,6 +2066,11 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     manifest['malformed_host_domain_lines'] = int(malformed_host_count)
             except Exception:
                 pass
+            # Routing mode exposure
+            try:
+                manifest['routing_mode'] = getattr(cfg,'routing_mode','strict') or 'strict'
+            except Exception:
+                manifest['routing_mode'] = 'strict'
             # environment metadata
             try:
                 import platform, sys as _sys
@@ -2418,6 +2454,7 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--log-redirect-chain', action='store_true', help='Resolve and log HTTP redirect chain before cloning')
     parser.add_argument('--save-wget-stderr', action='store_true', help='Save full wget2 stderr to file (wget_stderr.log) in output folder')
     parser.add_argument('--insecure', action='store_true', help='IGNORE TLS certificate validation (adds --no-check-certificate to wget2). Diagnostic-only; do not use routinely.')
+    parser.add_argument('--routing-mode', choices=['strict','spa','ext','hybrid'], default='strict', help='Routing: strict(404), spa(fallback /index.html), ext(extensionless .html), hybrid(ext then SPA)')
     args = parser.parse_args(argv)
 
     if args.selftest_verification:
@@ -2472,7 +2509,7 @@ def headless_main(argv: list[str]) -> int:
         plugins_dir=args.plugins_dir, json_logs=args.json_logs, profile=args.profile, open_browser=args.open_browser,
     run_built=args.run_built, serve_folder=args.serve_folder, cleanup=args.cleanup,
     events_file=args.events_file, progress_mode=args.progress, user_agent=args.user_agent, extra_wget_args=args.extra_wget_args,
-    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr, insecure=args.insecure
+    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr, insecure=args.insecure, routing_mode=args.routing_mode
     )
     if args.print_repro:
         repro=_build_repro_command_from_config(cfg)
