@@ -261,8 +261,34 @@ class ChatAssistantDialog(QDialog):
                 with client.stream('POST',OPENROUTER_API,json=payload,headers=headers) as r:
                     status = getattr(r, 'status_code', None)
                     if status and status >=400:
-                        self._process_response(f'[error] streaming HTTP {status}')
-                        return
+                        # Special handling for 402 (Payment Required / quota) – rotate to next free model automatically.
+                        if status == 402:
+                            try: self._log(f'[ai] model {model} returned HTTP 402 (payment/quota) – attempting alternate free model...')
+                            except Exception: pass
+                            rotated=False
+                            for alt in FREE_MODELS:
+                                if alt==model: continue
+                                try:
+                                    # Quick non-stream fallback for alternate model
+                                    payload_alt={'model':alt,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}], 'temperature':0.2,'max_tokens':600}
+                                    with httpx.Client(timeout=45) as c2:
+                                        resp2=c2.post(OPENROUTER_API,json=payload_alt,headers=headers)
+                                        if resp2.status_code==200:
+                                            data=resp2.json(); content=data.get('choices',[{}])[0].get('message',{}).get('content','')
+                                            if content:
+                                                try: self._log(f'[ai] switched to alternate free model: {alt}')
+                                                except Exception: pass
+                                                self._process_response(content)
+                                                rotated=True
+                                                break
+                                except Exception:
+                                    continue
+                            if not rotated:
+                                self._process_response('[error] 402 on primary model and no alternate free model produced a response.')
+                            return
+                        else:
+                            self._process_response(f'[error] streaming HTTP {status}')
+                            return
                     for raw in r.iter_lines():
                         if not raw: continue
                         if not raw.startswith('data:'): continue
