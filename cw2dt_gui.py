@@ -1598,3 +1598,16 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                 self.console.append(f"[gui] adopt failed: {e}")
             except Exception:
                 pass
+
+# Public launch wrapper expected by dispatcher cw2dt.py
+def launch():  # pragma: no cover
+    app = QApplication.instance()
+    created = False
+    if app is None:
+        app = QApplication(sys.argv)
+        created = True
+    win = DockerClonerGUI(); win.show()
+    # Only start event loop if we created the QApplication
+    if created:
+        return app.exec()
+    return 0
