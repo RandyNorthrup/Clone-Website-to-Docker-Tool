@@ -1171,19 +1171,25 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                         with socketserver.TCPServer((ip, port), _Handler) as httpd:
                             self._serve_httpd=httpd
                             self._on_log(f'[serve] http://{ip}:{port} -> {folder}')
+                            # Schedule UI notification on the main thread (macOS requires window ops on main thread)
                             try:
+                                from PySide6.QtCore import QTimer
                                 from PySide6.QtWidgets import QMessageBox
-                                QMessageBox.information(self,'Serve Started',f'Serving {folder}\nhttp://{ip}:{port}')
-                            except Exception: pass
+                                QTimer.singleShot(0, lambda: QMessageBox.information(self,'Serve Started',f'Serving {folder}\nhttp://{ip}:{port}'))
+                            except Exception:
+                                pass
                             httpd.serve_forever()
                     except Exception as e:
                         self._on_log(f'[serve] failed: {e}')
                     finally:
                         self._serve_httpd=None; self._serve_thread=None
+                        # Notify stop on main thread
                         try:
+                            from PySide6.QtCore import QTimer
                             from PySide6.QtWidgets import QMessageBox
-                            QMessageBox.information(self,'Serve Stopped','Folder serving stopped.')
-                        except Exception: pass
+                            QTimer.singleShot(0, lambda: QMessageBox.information(self,'Serve Stopped','Folder serving stopped.'))
+                        except Exception:
+                            pass
                 self._serve_thread=threading.Thread(target=_run,daemon=True); self._serve_thread.start(); self.btn_serve.setText('Stop Serve')
             except Exception as e:
                 self._on_log(f'[serve] failed: {e}')
