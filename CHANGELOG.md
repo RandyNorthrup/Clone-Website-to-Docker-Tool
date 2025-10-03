@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented here. The format loosely follows Keep a Changelog.
 
+## [1.1.8] - 2025-10-02
+
+### Added (AI & Events)
+
+- AI Assistant risk event (`ai_changes_risk`) emitted with structured `changes` + `risks` dictionaries before user applies proposals.
+- Documentation of AI events (`ai_changes_proposed`, `ai_changes_risk`, `ai_changes_applied`, `ai_changes_undo`) and `adaptive_concurrency_adjust` in `EVENTS.md` with risk heuristics table.
+- Unit tests for AI chat helper functions (`parse_ai_changes`, `assess_change_risks`).
+
+### Changed (AI Integration)
+
+- Replaced corrupted multi-duplicate `ai_chat.py` with a clean authoritative implementation (streaming toggle, watch mode, transcript logging, whitelist & risk heuristics, diff preview).
+- GUI now emits structured JSON event for AI risk heuristics via `on_ai_changes_risk`.
+
+### Internal (Docs & Hygiene)
+
+- Markdown lint compliance improvements for `EVENTS.md` (spacing, list/table formatting).
+- Minor refactor comments & consistency polish (no functional regression expected).
+- Updated README with AI Chat Assistant feature and roadmap adjustments; help topics updated (adaptive concurrency now experimental active restart + new ai_chat_assistant page).
+
 ## [1.1.7] - 2025-10-01
 
 ### Added (QA & UX)

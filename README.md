@@ -49,6 +49,7 @@ A desktop + CLI utility to clone public or private websites using **wget2** (par
   - Save / Load configuration profiles (reusable loadouts)
 - **Cross-platform**: macOS, Linux, Windows
 - **Fail-soft optional features**: prerender gracefully skipped if Playwright not installed
+- **AI Chat Assistant**: Streaming OpenRouter-powered guidance with watch mode, risk heuristics, transcript logging, and diff preview selective apply (whitelist enforced)
 
 ---
 
@@ -461,9 +462,9 @@ The GUI now includes a dedicated **Troubleshooting** collapsible panel exposing:
 
 1. **Diagnose Last Error** – Analyzes the tail of the console log (recent ~80 lines) to detect:
 
-  - wget2 exit codes (2,4,5,6,8)
-  - Common HTTP status patterns (403,404,429,503)
-  - Missing custom User-Agent / retry/backoff hints
+- wget2 exit codes (2,4,5,6,8)
+- Common HTTP status patterns (403,404,429,503)
+- Missing custom User-Agent / retry/backoff hints
 
   Suggestions are displayed in a dialog and echoed (summarized) back into the console with `[diag]` prefixes.
 
@@ -539,10 +540,10 @@ Short-Term:
 
 Dynamic Site Enhancements (Next Iterations):
 
-- Client-side router interception (pushState / history API) for deeper SPA traversal
 - Automatic discovery of JS-triggered navigations (e.g., buttons) via heuristic event hooking
 - Snapshot diffing to detect meaningful DOM changes before writing
 - Form autofill + scripted auth templates (beyond manual cookie import)
+- AI Assistant enhancements: risk severity tiers, configurable thresholds, customizable whitelist extensions, pluggable heuristics
 
 Longer-Term:
 
