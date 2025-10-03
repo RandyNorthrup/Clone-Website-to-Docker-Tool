@@ -234,7 +234,8 @@ class DockerClonerGUI(QWidget):
         row2=QHBoxLayout(); row2.setSpacing(6)
         self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
         self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); row2.addWidget(self.btn_serve)
-        self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
+    self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
+    self.btn_use_existing=QPushButton('Use Existing Folder'); row2.addWidget(self.btn_use_existing)
         self.btn_deps=QPushButton('Dependencies'); row2.addWidget(self.btn_deps)
         self.btn_save_cfg=QPushButton('Save Config'); row2.addWidget(self.btn_save_cfg)
         self.btn_load_cfg=QPushButton('Load Config'); row2.addWidget(self.btn_load_cfg)
@@ -263,7 +264,8 @@ class DockerClonerGUI(QWidget):
         self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self.btn_wizard.clicked.connect(self._run_wizard)
-        self.btn_build_now.clicked.connect(self._build_now)
+    self.btn_build_now.clicked.connect(self._build_now)
+    self.btn_use_existing.clicked.connect(self._use_existing_folder)
         self.btn_copy_addr.clicked.connect(self._copy_address)
         self.btn_open_addr.clicked.connect(self._open_address)
         # Dynamic interlocks
@@ -372,6 +374,7 @@ class DockerClonerGUI(QWidget):
             'btn_save_cfg':"Save current settings as a reusable profile (stored in ~/.cw2dt_profiles).",
             'btn_load_cfg':"Load a previously saved profile and apply its settings.",
             'btn_build_now':"Manually build (or rebuild) the Docker image using the last successful clone output. Existing image is re-tagged with :prev-<timestamp> if present.",
+            'btn_use_existing':"Select an existing cloned output folder (with files/Dockerfile) to enable Serve / Build / Run without performing a new clone.",
             'btn_copy_addr':"Copy the expected site URL (http://<bind_ip or localhost>:<host_port>) to clipboard (enabled after run or serve).",
             'btn_open_addr':"Open the expected site URL in your default browser (container or serve must be running to respond).",
             'btn_sections_toggle':"Expand or collapse all configuration sections (toggles state).",
@@ -399,7 +402,7 @@ class DockerClonerGUI(QWidget):
             self.phase_time_lbl.setToolTip('Elapsed time per completed phase (auto-updated).')
 
     def _normalize_buttons(self):
-        """Ensure all primary QPushButtons share consistent min size and padding.
+        """Ensure all primary QPushButton share consistent min size and padding.
         Keeps visual rhythm across rows without hard-locking dynamic resize behavior."""
         buttons=[getattr(self,n) for n in (
             'btn_clone','btn_estimate','btn_pause','btn_cancel','btn_wizard',
@@ -1527,24 +1530,52 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             for line in h.splitlines():
                 self._on_log('[diag] '+line)
 
-def launch():
-    app=QApplication(sys.argv)
-    # Set application-wide icon so macOS Dock / task switcher uses icon.png
-    try:
-        base=os.path.join(os.path.dirname(__file__),'images')
-        tried=False
-        ip=os.path.join(base,'icon.png')
-        if os.path.exists(ip):
-            app.setWindowIcon(QIcon(ip)); tried=True
-        if not tried:
-            root_dir=os.path.dirname(__file__)
-            for ic in ('icon.icns','icon.ico','icon.png'):
-                root_icon=os.path.join(root_dir,ic)
-                if os.path.exists(root_icon):
-                    app.setWindowIcon(QIcon(root_icon)); break
-    except Exception:
-        pass
-    w=DockerClonerGUI(); w.resize(1000,760); w.show(); sys.exit(app.exec())
-
-if __name__=='__main__':  # pragma: no cover
-    launch()
+    # --- Existing folder adoption ---
+    def _use_existing_folder(self):
+        """Let user select a preexisting output folder (already cloned) to enable build/serve/run without cloning again.
+        Accepts folder if it contains at least one HTML file OR a Dockerfile.
+        Sets _last_result stub so downstream actions treat it like a successful clone.
+        """
+        try:
+            path=QFileDialog.getExistingDirectory(self,'Select Existing Clone Folder')
+            if not path:
+                return
+            # Heuristics: if Dockerfile exists or at least one index.html present
+            dockerfile=os.path.join(path,'Dockerfile')
+            has_docker=os.path.exists(dockerfile)
+            has_html=False
+            if not has_docker:
+                for root,_,files in os.walk(path):
+                    if any(f.lower().endswith(('.html','.htm')) for f in files):
+                        has_html=True; break
+            if not (has_docker or has_html):
+                QMessageBox.warning(self,'Not a Clone Folder','Selected folder does not look like a clone output (no Dockerfile or HTML files).')
+                return
+            # Infer docker name: use current text or folder name
+            name=self.name_in.text().strip() or os.path.basename(path.rstrip(os.sep)) or 'site'
+            self.name_in.setText(name)
+            # Create a lightweight result-like stub
+            class _Stub: pass
+            stub=_Stub()
+            stub.success=True
+            stub.output_folder=path
+            stub.site_root=path
+            stub.docker_built=image_exists_locally(name)
+            self._last_result=stub
+            self.dest_in.setText(os.path.dirname(path))
+            # Enable relevant buttons
+            self.btn_build_now.setEnabled(True)
+            self.btn_serve.setEnabled(True)
+            if stub.docker_built:
+                self.btn_run_docker.setEnabled(True)
+            self._update_url_action_buttons(container_started=False)
+            self.console.append(f"[gui] adopted existing folder: {path}")
+            if not stub.docker_built and has_docker:
+                self.console.append('[hint] Dockerfile present but image not built – click Build Now to build it.')
+            if not has_docker:
+                self.console.append('[hint] No Dockerfile found; enable Build Docker image and run a fresh clone if you need a container, or just use Serve Folder.')
+        except Exception as e:
+            try:
+                self.console.append(f"[gui] adopt failed: {e}")
+            except Exception:
+                pass
