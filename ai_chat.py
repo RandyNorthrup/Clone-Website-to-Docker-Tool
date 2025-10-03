@@ -259,24 +259,54 @@ class ChatAssistantDialog(QDialog):
             self._log('Assistant (streaming):')
             with httpx.Client(timeout=None) as client:
                 with client.stream('POST',OPENROUTER_API,json=payload,headers=headers) as r:
+                    status = getattr(r, 'status_code', None)
+                    if status and status >=400:
+                        self._process_response(f'[error] streaming HTTP {status}')
+                        return
                     for raw in r.iter_lines():
                         if not raw: continue
-                        if raw.startswith('data:'):
-                            seg=raw[5:].strip()
-                            if seg=='[DONE]': break
-                            try:
-                                js=json.loads(seg); delta=js.get('choices',[{}])[0].get('delta',{}).get('content')
-                                if delta:
-                                    with self._stream_lock: self._stream_buffer += delta
-                                    def _upd(d=delta):
-                                        try:
-                                            from PySide6.QtGui import QTextCursor; self.chat_view.moveCursor(QTextCursor.MoveOperation.End)
-                                        except Exception: pass
-                                        self.chat_view.insertPlainText(d); self.chat_view.ensureCursorVisible(); self._set_status('Streaming...')
-                                    QTimer.singleShot(0,_upd)
-                            except Exception: continue
+                        if not raw.startswith('data:'): continue
+                        seg=raw[5:].strip()
+                        if not seg:
+                            continue
+                        if seg=='[DONE]':
+                            break
+                        try:
+                            js=json.loads(seg)
+                        except Exception:
+                            # Non-JSON keep-alive / comment line
+                            continue
+                        # Try multiple extraction paths (delta.content, message.content)
+                        choice = (js.get('choices') or [{}])[0]
+                        delta_txt = None
+                        if isinstance(choice, dict):
+                            delta_txt = choice.get('delta',{}).get('content') or choice.get('message',{}).get('content')
+                        if delta_txt:
+                            with self._stream_lock:
+                                self._stream_buffer += delta_txt
+                            def _upd(d=delta_txt):
+                                try:
+                                    from PySide6.QtGui import QTextCursor; self.chat_view.moveCursor(QTextCursor.MoveOperation.End)
+                                except Exception: pass
+                                self.chat_view.insertPlainText(d); self.chat_view.ensureCursorVisible(); self._set_status('Streaming...')
+                            QTimer.singleShot(0,_upd)
+                        else:
+                            # No token text; log diagnostic once per chunk type
+                            if js.get('choices'):
+                                try: self._log('[ai][stream] chunk w/out content keys')
+                                except Exception: pass
             final=self._stream_buffer; self._stream_buffer=''
-            if not final: final='[error] Empty streaming response'
+            if not final:
+                # Fallback: re-run non-stream request to salvage a reply
+                try:
+                    self._set_status('Fallback (non-stream)')
+                    payload_ns={'model':model,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}], 'temperature':0.2,'max_tokens':600}
+                    with httpx.Client(timeout=45) as client:
+                        resp=client.post(OPENROUTER_API,json=payload_ns,headers=headers)
+                        data=resp.json()
+                        final=data.get('choices',[{}])[0].get('message',{}).get('content','[error] Empty streaming + empty fallback')
+                except Exception as e:
+                    final=f'[error] Empty streaming response (fallback failed: {e})'
             self._process_response(final)
         except Exception as e:
             self._process_response(f'[error] streaming failed: {e}')
