@@ -8,16 +8,25 @@ from __future__ import annotations
 import os, sys, json, webbrowser, time, re
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QTextEdit, QCheckBox, QSpinBox, QMessageBox, QProgressBar, QGroupBox, QComboBox, QSplitter,
-    QScrollArea, QToolButton, QFrame, QSizePolicy
+    QFileDialog, QTextEdit, QCheckBox, QSpinBox, QDoubleSpinBox, QMessageBox, QProgressBar, QGroupBox, QComboBox, QSplitter,
+    QScrollArea, QToolButton, QFrame, QSizePolicy, QMenuBar
 )
 from PySide6.QtCore import Qt, QThread, Signal, QEvent, QSize
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap, QIcon, QAction
 
 from cw2dt_core import (
     validate_required_fields, is_wget2_available, docker_available,
     port_in_use, CloneConfig, CloneResult, clone_site, CloneCallbacks, image_exists_locally
 )
+from typing import List
+try:
+    from ai_chat import ChatAssistantDialog, WHITELIST as AI_WHITELIST
+except Exception:
+    ChatAssistantDialog=None; AI_WHITELIST=set()
+try:
+    from auto_retry import AutoRetryManager
+except Exception:  # pragma: no cover - optional import (file may not exist in some stripped builds)
+    AutoRetryManager=None
 
 class _GuiCallbacks(CloneCallbacks):
     def __init__(self, owner: 'DockerClonerGUI'): self._owner=owner
@@ -45,6 +54,48 @@ class _CloneWorker(QThread):
     def run(self):
         res=clone_site(self.cfg,self.cb); self.finished.emit(res)
 
+class _AutoRetryWorker(QThread):
+    """Worker wrapping AutoRetryManager for multi-attempt adaptive cloning."""
+    finished = Signal(object)
+    def __init__(self, base_cfg: CloneConfig, cb: _GuiCallbacks, attempts: int, ai_assist: bool, ai_endpoint: str, ai_api_key: str):
+        super().__init__(); self.base_cfg=base_cfg; self.cb=cb; self.attempts=attempts; self.ai_assist=ai_assist; self.ai_endpoint=ai_endpoint; self.ai_api_key=ai_api_key; self._cancel=False
+    def cancel(self): self._cancel=True
+    def run(self):
+        if AutoRetryManager is None:
+            self.cb.log('[auto] AutoRetryManager unavailable – falling back to single attempt')
+            res=clone_site(self.base_cfg,self.cb); self.finished.emit(res); return
+        # Inject cooperative cancel hook if available
+        try:
+            self.base_cfg.cancel_event = lambda: self._cancel  # simple poll; core honors via cb.is_canceled
+        except Exception:
+            pass
+        mgr=AutoRetryManager(self.base_cfg, max_attempts=self.attempts, ai_assist=self.ai_assist, ai_endpoint=self.ai_endpoint, ai_api_key=self.ai_api_key)
+        # Structured event sink: forward as JSON lines for unified parsing by GUI log handler.
+        def _sink(evt: dict):
+            try:
+                import json as _j
+                self.cb.log(_j.dumps(evt))
+            except Exception:
+                pass
+        try: mgr.event_sink=_sink  # type: ignore
+        except Exception: pass
+        res=mgr.run(self.cb)
+        # Attach attempt history to manifest (best effort) and result object
+        try:
+            setattr(res,'auto_retry_attempts', mgr.attempts)
+            mp = getattr(res,'manifest_path',None)
+            if isinstance(mp,str) and mp and os.path.exists(mp):
+                import json as _j
+                try:
+                    with open(mp,'r',encoding='utf-8') as _mf: _md=_j.load(_mf)
+                    _md['auto_retry_attempts']=mgr.attempts
+                    with open(mp,'w',encoding='utf-8') as _mf: _j.dump(_md,_mf,indent=2)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.finished.emit(res)
+
 class _CollapsibleBox(QWidget):
     """Collapsible section with header spanning width."""
     toggled = Signal(bool)
@@ -71,6 +122,11 @@ class DockerClonerGUI(QWidget):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Clone Website to Docker Tool')
         self.worker=None; self._paused=False; self._last_result=None; self._serve_httpd=None; self._serve_thread=None
+        self._ai_applied_history=[]  # stack of (inverse_changes, timestamp)
+        # Port error and dynamic guidance state
+        self._port_error_count=0
+        self._port_error_notified=False
+        self._dynamic_hint_shown=False
         # Track geometry to enforce right-edge-only horizontal resizing
         self._anchor_left=None
         self._last_size=None
@@ -106,6 +162,23 @@ class DockerClonerGUI(QWidget):
 
     def _build_ui(self):
         root=QVBoxLayout(self); root.setContentsMargins(4,4,4,4)
+        # Menubar (force non-native so it appears inside window on macOS even though we are not using QMainWindow)
+        self.menubar=QMenuBar(self)
+        try:
+            # On macOS this prevents it from merging into the global system menu bar
+            self.menubar.setNativeMenuBar(False)  # no-op on non-mac platforms
+        except Exception:
+            pass
+        # Provide a dark style so it is visually distinct
+        self.menubar.setStyleSheet(
+            "QMenuBar { background:#2f2f2f; color:#eee; border:0; }"
+            "QMenuBar::item { padding:4px 10px; background:transparent; }"
+            "QMenuBar::item:selected { background:#444; }"
+            "QMenu { background:#2f2f2f; color:#eee; }"
+            "QMenu::item:selected { background:#444; }"
+        )
+        root.addWidget(self.menubar)
+        self._build_menus()
         banner=QHBoxLayout(); banner.setSpacing(8); self._add_banner_images(banner); root.addLayout(banner)
         class _NoDragSplitter(QSplitter):
             def createHandle(self):
@@ -212,7 +285,40 @@ class DockerClonerGUI(QWidget):
             self.chk_insecure_tls, self.btn_diagnose
         ):
             trouble.addWidget(w)
+        # Verbose raw wget2 output toggle (streams every stderr line)
+        self.chk_verbose_wget=QCheckBox('Verbose wget2 output (raw stderr lines)')
+        self.chk_verbose_wget.setToolTip('Stream raw wget2 stderr lines directly into console for deep troubleshooting (very noisy).')
+        trouble.addWidget(self.chk_verbose_wget)
         config_v.addWidget(trouble)
+        # Resilience & Quality section (new robustness flags)
+        resilience=_CollapsibleBox('Resilience & Quality'); self._sections.append(resilience)
+        self.chk_resilient=QCheckBox('Resilient initial attempt (broader retries/timeouts)')
+        self.chk_relaxed_tls=QCheckBox('Relaxed TLS (disable keep-alive/cache + insecure)')
+        self.chk_allow_degraded=QCheckBox('Allow degraded success (keep success even if high error ratio)')
+        self.chk_adaptive_conc=QCheckBox('Adaptive concurrency (experimental)')
+        self.spin_failure_threshold=QDoubleSpinBox(); self.spin_failure_threshold.setRange(0.0,1.0); self.spin_failure_threshold.setSingleStep(0.01); self.spin_failure_threshold.setValue(0.15)
+        ft_row=QHBoxLayout(); ft_row.addWidget(QLabel('Failure Threshold:')); ft_row.addWidget(self.spin_failure_threshold); ft_row.addStretch(1)
+        for w in (self.chk_resilient,self.chk_relaxed_tls,self.chk_allow_degraded,self.chk_adaptive_conc): resilience.addWidget(w)
+        resilience.addLayout(ft_row)
+        # Auto-mark insecure when relaxed TLS is enabled
+        self.chk_relaxed_tls.toggled.connect(lambda on: (self.chk_insecure_tls.setChecked(True) if on else None))
+        config_v.addWidget(resilience)
+        # Automation / AI Assist section
+        auto=_CollapsibleBox('Automation / AI Assist'); self._sections.append(auto)
+        self.chk_enable_auto_retry=QCheckBox('Enable Auto Retry Supervisor')
+        self.spin_max_attempts=QSpinBox(); self.spin_max_attempts.setRange(1,8); self.spin_max_attempts.setValue(3)
+        self.chk_ai_assist=QCheckBox('AI Assist (endpoint suggestions)')
+        self.ai_endpoint_in=QLineEdit(); self.ai_endpoint_in.setPlaceholderText('AI endpoint URL (POST)')
+        self.ai_api_key_in=QLineEdit(); self.ai_api_key_in.setPlaceholderText('API Key (optional)'); self.ai_api_key_in.setEchoMode(QLineEdit.EchoMode.Password)
+        auto.addWidget(self.chk_enable_auto_retry)
+        auto.addWidget(QLabel('Max Attempts:'))
+        auto.addWidget(self.spin_max_attempts)
+        auto.addWidget(self.chk_ai_assist)
+        auto.addWidget(QLabel('AI Endpoint:'))
+        auto.addWidget(self.ai_endpoint_in)
+        auto.addWidget(QLabel('AI API Key:'))
+        auto.addWidget(self.ai_api_key_in)
+        config_v.addWidget(auto)
         config_v.addStretch(1)
         # Footer reset defaults button spanning width
         from PySide6.QtWidgets import QFrame
@@ -234,22 +340,20 @@ class DockerClonerGUI(QWidget):
         self.btn_cancel=QPushButton('Cancel'); self.btn_cancel.setEnabled(False); row1.addWidget(self.btn_cancel)
         self.btn_wizard=QPushButton('Wizard'); row1.addWidget(self.btn_wizard); self.btn_wizard.setEnabled(False)
         row1.addStretch(1)
+        # Row 2: Post-clone + utility actions (exactly 5 buttons)
         row2=QHBoxLayout(); row2.setSpacing(6)
+        self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
         self.btn_run_docker=QPushButton('Run Docker'); self.btn_run_docker.setEnabled(False); row2.addWidget(self.btn_run_docker)
         self.btn_serve=QPushButton('Serve Folder'); self.btn_serve.setEnabled(False); row2.addWidget(self.btn_serve)
-        self.btn_build_now=QPushButton('Build Now'); self.btn_build_now.setEnabled(False); row2.addWidget(self.btn_build_now)
-        self.btn_use_existing=QPushButton('Use Existing Folder'); row2.addWidget(self.btn_use_existing)
-        self.btn_deps=QPushButton('Dependencies'); row2.addWidget(self.btn_deps)
-        self.btn_save_cfg=QPushButton('Save Config'); row2.addWidget(self.btn_save_cfg)
-        self.btn_load_cfg=QPushButton('Load Config'); row2.addWidget(self.btn_load_cfg)
+        self.btn_copy_addr=QPushButton('Copy Address'); self.btn_copy_addr.setEnabled(False); row2.addWidget(self.btn_copy_addr)
+        self.btn_open_addr=QPushButton('Open in Browser'); self.btn_open_addr.setEnabled(False); row2.addWidget(self.btn_open_addr)
         row2.addStretch(1)
         rv.addLayout(row1); rv.addLayout(row2)
-        # Row 3: URL convenience actions
-        row3=QHBoxLayout(); row3.setSpacing(6)
-        self.btn_copy_addr=QPushButton('Copy Address'); self.btn_copy_addr.setEnabled(False); row3.addWidget(self.btn_copy_addr)
-        self.btn_open_addr=QPushButton('Open in Browser'); self.btn_open_addr.setEnabled(False); row3.addWidget(self.btn_open_addr)
-        row3.addStretch(1)
-        rv.addLayout(row3)
+        # Hidden / menu-only buttons (not added to layout): keep for logic compatibility
+        self.btn_use_existing=QPushButton('Use Existing Folder'); self.btn_use_existing.hide()
+        self.btn_deps=QPushButton('Dependencies'); self.btn_deps.hide()
+        self.btn_save_cfg=QPushButton('Save Config'); self.btn_save_cfg.hide()
+        self.btn_load_cfg=QPushButton('Load Config'); self.btn_load_cfg.hide()
         self.prog=QProgressBar(); self.prog.setRange(0,100); rv.addWidget(self.prog)
         # Lightweight dependency banner (hidden unless something missing)
         from PySide6.QtWidgets import QFrame
@@ -264,11 +368,11 @@ class DockerClonerGUI(QWidget):
         self.console=QTextEdit(); self.console.setReadOnly(True); rv.addWidget(self.console,1)
         self.splitter.addWidget(right); self.splitter.setStretchFactor(0,0); self.splitter.setStretchFactor(1,1)
         # Connections
-        self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items); self.btn_deps.clicked.connect(self._show_deps_dialog)
+        self.btn_clone.clicked.connect(self.start_clone); self.btn_cancel.clicked.connect(self._cancel_clone); self.btn_estimate.clicked.connect(self._estimate_items)
         self.btn_pause.clicked.connect(self._toggle_pause); self.btn_run_docker.clicked.connect(self._run_docker_image); self.btn_serve.clicked.connect(self._serve_folder)
         self.btn_wizard.clicked.connect(self._run_wizard)
         self.btn_build_now.clicked.connect(self._build_now)
-        self.btn_use_existing.clicked.connect(self._use_existing_folder)
+        self.btn_use_existing.clicked.connect(self._use_existing_folder)  # hidden counterpart
         self.btn_copy_addr.clicked.connect(self._copy_address)
         self.btn_open_addr.clicked.connect(self._open_address)
         # Dynamic interlocks
@@ -303,6 +407,148 @@ class DockerClonerGUI(QWidget):
         self._apply_tooltips()
         # Normalize button appearance (uniform sizing / padding)
         self._normalize_buttons()
+        
+    def _build_menus(self):
+        file_menu=self.menubar.addMenu('&File')
+        act_save=QAction('Save Config', self); act_save.triggered.connect(self._save_profile_dialog); file_menu.addAction(act_save)
+        act_load=QAction('Load Config', self); act_load.triggered.connect(self._load_profile_dialog); file_menu.addAction(act_load)
+        file_menu.addSeparator(); act_use=QAction('Use Existing Folder', self); act_use.triggered.connect(self._use_existing_folder); file_menu.addAction(act_use)
+        file_menu.addSeparator(); act_reset=QAction('Reset Defaults', self); act_reset.triggered.connect(self._reset_defaults); file_menu.addAction(act_reset)
+        file_menu.addSeparator(); act_exit=QAction('Exit', self); act_exit.triggered.connect(QApplication.quit); file_menu.addAction(act_exit)
+        tools=self.menubar.addMenu('&Tools')
+        act_wizard=QAction('Wizard', self); act_wizard.triggered.connect(self._run_wizard); tools.addAction(act_wizard)
+        act_deps=QAction('Dependencies', self); act_deps.triggered.connect(self._show_deps_dialog); tools.addAction(act_deps)
+        tools.addSeparator(); act_diag=QAction('Diagnose Last Error', self); act_diag.triggered.connect(self._run_diagnostics); tools.addAction(act_diag)
+        help_m=self.menubar.addMenu('&Help')
+        act_help=QAction('Help Contents', self); act_help.triggered.connect(self._open_help); help_m.addAction(act_help)
+        act_index=QAction('Feature Index', self); act_index.triggered.connect(lambda: self._open_help(show_index=True)); help_m.addAction(act_index)
+        help_m.addSeparator()
+        # AI Chat Assistant entry
+        act_ai=QAction('Start AI Chat', self)
+        act_ai.triggered.connect(self._open_ai_chat)
+        help_m.addAction(act_ai)
+        act_ai_undo=QAction('Undo Last AI Changes', self)
+        act_ai_undo.triggered.connect(self._undo_last_ai_changes)
+        help_m.addAction(act_ai_undo)
+        help_m.addSeparator(); act_about=QAction('About', self); act_about.triggered.connect(self._show_about); help_m.addAction(act_about)
+
+    def _open_help(self, show_index: bool=False):
+        try:
+            from help_viewer import HelpViewer
+        except Exception:
+            QMessageBox.warning(self,'Help','Help module not available.')
+            return
+        dlg=HelpViewer(self, show_index=show_index)
+        dlg.exec()
+
+    def _open_ai_chat(self):
+        if ChatAssistantDialog is None:
+            QMessageBox.warning(self,'AI Chat','AI chat module unavailable (missing ai_chat.py).')
+            return
+        if getattr(self,'_ai_chat_dialog',None) and self._ai_chat_dialog.isVisible():
+            self._ai_chat_dialog.raise_(); self._ai_chat_dialog.activateWindow(); return
+        # Build callables
+        def _cfg_snapshot(): return self._current_profile_dict()  # reuses existing aggregator (safe subset)
+        def _logs_snapshot():
+            try: return self.console.toPlainText().splitlines()[-400:]
+            except Exception: return []
+        def _api_key():
+            # Prefer AI endpoint key field if set, else OPENROUTER_API_KEY env
+            if hasattr(self,'ai_api_key_in') and self.ai_api_key_in.text().strip():
+                return self.ai_api_key_in.text().strip()
+            return None
+        self._ai_chat_dialog=ChatAssistantDialog(self,_cfg_snapshot,_logs_snapshot,_api_key,self)
+        self._ai_chat_dialog.show()
+
+    def apply_ai_changes(self, changes: dict) -> List[str]:
+        """Apply whitelisted field changes from AI to GUI widgets. Returns list of applied keys."""
+        applied=[]
+        inverse={}
+        for k,v in (changes or {}).items():
+            if k not in AI_WHITELIST: continue
+            try:
+                if k=='prerender': inverse[k]=self.chk_prerender.isChecked(); self.chk_prerender.setChecked(bool(v)); applied.append(k)
+                elif k=='router_intercept': inverse[k]=self.chk_router.isChecked(); self.chk_router.setChecked(bool(v)); applied.append(k)
+                elif k=='resilient': inverse[k]=self.chk_resilient.isChecked(); self.chk_resilient.setChecked(bool(v)); applied.append(k)
+                elif k=='relaxed_tls': inverse[k]=self.chk_relaxed_tls.isChecked(); self.chk_relaxed_tls.setChecked(bool(v)); applied.append(k)
+                elif k=='allow_degraded': inverse[k]=self.chk_allow_degraded.isChecked(); self.chk_allow_degraded.setChecked(bool(v)); applied.append(k)
+                elif k=='incremental': inverse[k]=self.chk_incremental.isChecked(); self.chk_incremental.setChecked(bool(v)); applied.append(k)
+                elif k=='capture_api': inverse[k]=self.chk_capture_api.isChecked(); self.chk_capture_api.setChecked(bool(v)); applied.append(k)
+                elif k=='capture_storage': inverse[k]=self.chk_capture_storage.isChecked(); self.chk_capture_storage.setChecked(bool(v)); applied.append(k)
+                elif k=='capture_api_binary': inverse[k]=self.chk_capture_api_binary.isChecked(); self.chk_capture_api_binary.setChecked(bool(v)); applied.append(k)
+                elif k=='capture_graphql': inverse[k]=self.chk_capture_graphql.isChecked(); self.chk_capture_graphql.setChecked(bool(v)); applied.append(k)
+                elif k=='checksums': inverse[k]=self.chk_checksums.isChecked(); self.chk_checksums.setChecked(bool(v)); self.chk_verify_after.setChecked(bool(v)); applied.append(k)
+                elif k=='verify_after': inverse[k]=self.chk_verify_after.isChecked(); self.chk_verify_after.setChecked(bool(v)); applied.append(k)
+                elif k=='verify_deep': inverse[k]=self.chk_verify_deep.isChecked(); self.chk_verify_deep.setChecked(bool(v)); applied.append(k)
+                elif k=='disable_js': inverse[k]=self.chk_disable_js.isChecked(); self.chk_disable_js.setChecked(bool(v)); applied.append(k)
+                elif k=='jobs' and hasattr(self,'spin_threads'):
+                    inverse[k]=self.spin_threads.value(); self.spin_threads.setValue(int(v)); applied.append(k)
+                elif k=='failure_threshold':
+                    inverse[k]=self.spin_failure_threshold.value(); self.spin_failure_threshold.setValue(float(v)); applied.append(k)
+                elif k=='prerender_max_pages':
+                    inverse[k]=self.spin_prer_pages.value(); self.spin_prer_pages.setValue(int(v)); applied.append(k)
+                elif k=='prerender_scroll':
+                    inverse[k]=self.spin_prer_scroll.value(); self.spin_prer_scroll.setValue(int(v)); applied.append(k)
+                elif k=='auto_backoff': inverse[k]=self.chk_auto_backoff.isChecked(); self.chk_auto_backoff.setChecked(bool(v)); applied.append(k)
+                elif k=='adaptive_concurrency': inverse[k]=self.chk_adaptive_conc.isChecked(); self.chk_adaptive_conc.setChecked(bool(v)); applied.append(k)
+                elif k=='verbose_wget': inverse[k]=self.chk_verbose_wget.isChecked(); self.chk_verbose_wget.setChecked(bool(v)); applied.append(k)
+            except Exception:
+                pass
+        if applied:
+            # Store inverse snapshot for undo
+            try:
+                import time as _t
+                self._ai_applied_history.append((inverse,_t.time()))
+            except Exception:
+                pass
+            self._on_log('[ai] applied changes: '+', '.join(applied))
+            # Structured JSON event for external tooling / future analytics
+            try:
+                import json as _j
+                self._on_log(_j.dumps({'event':'ai_changes_applied','changes':{k:changes.get(k) for k in applied}}))
+            except Exception:
+                pass
+        return applied
+
+    def on_ai_proposed_changes(self, changes: dict):
+        """Structured event when AI proposes (but not yet applied) config changes."""
+        try:
+            import json as _j
+            self._on_log(_j.dumps({'event':'ai_changes_proposed','changes':changes}))
+        except Exception:
+            pass
+
+    def on_ai_changes_risk(self, changes: dict, risks: dict):
+        """Structured event when AI-proposed changes have associated risk heuristics.
+
+        Emitted before application (during preview) so external tooling / logs can surface
+        potentially unsafe adjustments (e.g. large jobs jump, relaxed TLS enabling)."""
+        try:
+            import json as _j
+            self._on_log(_j.dumps({'event':'ai_changes_risk','changes':changes,'risks':risks}))
+        except Exception:
+            pass
+
+    def _undo_last_ai_changes(self):
+        if not self._ai_applied_history:
+            QMessageBox.information(self,'AI Undo','No AI changes to undo.')
+            return
+        inverse,_ts=self._ai_applied_history.pop()
+        if not inverse:
+            return
+        applied=self.apply_ai_changes(inverse)
+        if applied:
+            self._on_log('[ai] undo applied: '+', '.join(applied))
+            try:
+                import json as _j
+                self._on_log(_j.dumps({'event':'ai_changes_undo','changes':{k:inverse.get(k) for k in applied}}))
+            except Exception:
+                pass
+        else:
+            self._on_log('[ai] undo had no applicable fields')
+
+    def _show_about(self):
+        QMessageBox.information(self,'About','Clone Website to Docker Tool\nStatic + dynamic capture → Docker image.\nSee Help > Contents for documentation.')
 
     # Helpers
     def _browse_dest(self):
@@ -390,6 +636,16 @@ class DockerClonerGUI(QWidget):
             'chk_log_redirect_chain':"Preflight HEAD/GET to log the redirect chain before cloning.",
             'chk_save_wget_stderr':"Save full wget2 stderr to wget_stderr.log inside output folder for deep analysis.",
             'chk_insecure_tls':"Add --no-check-certificate to wget2 (diagnostic only, disables TLS validation – security risk).",
+            'chk_resilient':"Enable broader retries/timeouts and connection refusal retries on the first attempt (internal resilient flag).",
+            'chk_relaxed_tls':"Disable HTTP keep-alive & caching and force insecure TLS (helps with flaky TLS endpoints; combines with Ignore TLS Cert).",
+            'spin_failure_threshold':"Error ratio threshold (0-1). If exceeded, a quality-based second attempt may occur (with Auto Backoff) or run marked degraded.",
+            'chk_allow_degraded':"Do not fail the clone even if error ratio exceeds threshold; success flagged with degraded quality event.",
+            'chk_adaptive_conc':"Experimental: allow future adaptive concurrency reductions mid-run (placeholder).",
+            'chk_enable_auto_retry':"Run a supervised multi-attempt loop that auto-adjusts settings (resilient mode, retries, concurrency) when the first attempt fails.",
+            'spin_max_attempts':"Maximum total attempts (including the first).",
+            'chk_ai_assist':"If enabled, calls the AI endpoint after a failed attempt with recent logs & config to propose safe field mutations.",
+            'ai_endpoint_in':"HTTP endpoint that accepts POST JSON and returns {changes:{field:value,...}} to modify the next attempt's configuration.",
+            'ai_api_key_in':"Optional bearer token sent as Authorization: Bearer <key> for the AI endpoint.",
         }
         for name,text in tt.items():
             w=getattr(self,name,None)
@@ -409,17 +665,22 @@ class DockerClonerGUI(QWidget):
         Keeps visual rhythm across rows without hard-locking dynamic resize behavior."""
         buttons=[getattr(self,n) for n in (
             'btn_clone','btn_estimate','btn_pause','btn_cancel','btn_wizard',
-            'btn_run_docker','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg'
+            'btn_build_now','btn_run_docker','btn_serve','btn_copy_addr','btn_open_addr'
         ) if hasattr(self,n)]  # sections toggle intentionally excluded (slim style)
         if not buttons: return
         # Determine a reasonable min width (longest text + padding heuristic)
         fm=self.fontMetrics()
         max_text_w=max(fm.horizontalAdvance(b.text()) for b in buttons)+28  # padding allowance
-        target_w=min(max(110, max_text_w), 220)  # clamp upper bound to avoid overly wide buttons
+        # Force a uniform width so all buttons match exactly (user requested uniform size)
+        target_w=min(max(130, max_text_w), 220)  # slightly higher minimum for consistency
         for b in buttons:
             try:
                 b.setMinimumHeight(32)
+                b.setMaximumHeight(32)
                 b.setMinimumWidth(target_w)
+                b.setMaximumWidth(target_w)
+                # Fixed size policy to avoid stretch making widths drift
+                b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
                 b.setIconSize(QSize(16,16))
             except Exception:
                 pass
@@ -429,7 +690,7 @@ class DockerClonerGUI(QWidget):
         if hasattr(self,'btn_run_docker'): self.btn_run_docker.setProperty('kind','primary')
         if hasattr(self,'btn_cancel'): self.btn_cancel.setProperty('kind','danger')
         # Remaining default to secondary; optionally mark explicitly
-        for name in ('btn_estimate','btn_pause','btn_serve','btn_deps','btn_save_cfg','btn_load_cfg'):
+        for name in ('btn_estimate','btn_pause','btn_build_now','btn_run_docker','btn_serve','btn_copy_addr','btn_open_addr'):
             if hasattr(self,name): getattr(self,name).setProperty('kind','secondary')
         # Apply a stylesheet with variant colors
         style="""
@@ -600,6 +861,12 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         if hasattr(self,'chk_log_redirect_chain'): self.chk_log_redirect_chain.setChecked(False)
         if hasattr(self,'chk_save_wget_stderr'): self.chk_save_wget_stderr.setChecked(False)
         if hasattr(self,'chk_insecure_tls'): self.chk_insecure_tls.setChecked(False)
+        # Resilience defaults
+        if hasattr(self,'chk_resilient'): self.chk_resilient.setChecked(False)
+        if hasattr(self,'chk_relaxed_tls'): self.chk_relaxed_tls.setChecked(False)
+        if hasattr(self,'chk_allow_degraded'): self.chk_allow_degraded.setChecked(False)
+        if hasattr(self,'chk_adaptive_conc'): self.chk_adaptive_conc.setChecked(False)
+        if hasattr(self,'spin_failure_threshold'): self.spin_failure_threshold.setValue(0.15)
         # Re-run interlock logic and dependency banner
         self._on_prerender_toggled(self.chk_prerender.isChecked())
         self._update_dependency_banner()
@@ -638,6 +905,17 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             'log_redirect_chain': self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
             'save_wget_stderr': self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
             ,'insecure': self.chk_insecure_tls.isChecked() if hasattr(self,'chk_insecure_tls') else False
+            ,'resilient': self.chk_resilient.isChecked() if hasattr(self,'chk_resilient') else False
+            ,'relaxed_tls': self.chk_relaxed_tls.isChecked() if hasattr(self,'chk_relaxed_tls') else False
+            ,'failure_threshold': self.spin_failure_threshold.value() if hasattr(self,'spin_failure_threshold') else 0.15
+            ,'allow_degraded': self.chk_allow_degraded.isChecked() if hasattr(self,'chk_allow_degraded') else False
+            ,'adaptive_concurrency': self.chk_adaptive_conc.isChecked() if hasattr(self,'chk_adaptive_conc') else False
+            ,'verbose_wget': self.chk_verbose_wget.isChecked() if hasattr(self,'chk_verbose_wget') else False
+            ,'enable_auto_retry': self.chk_enable_auto_retry.isChecked() if hasattr(self,'chk_enable_auto_retry') else False
+            ,'max_attempts': self.spin_max_attempts.value() if hasattr(self,'spin_max_attempts') else 1
+            ,'ai_assist': self.chk_ai_assist.isChecked() if hasattr(self,'chk_ai_assist') else False
+            ,'ai_endpoint': self.ai_endpoint_in.text().strip() if hasattr(self,'ai_endpoint_in') else ''
+            ,'ai_api_key': self.ai_api_key_in.text().strip() if hasattr(self,'ai_api_key_in') else ''
         }
     def _apply_profile_dict(self, data: dict):
         try:
@@ -705,6 +983,21 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             if hasattr(self,'chk_log_redirect_chain'): self.chk_log_redirect_chain.setChecked(bool(data.get('log_redirect_chain')))
             if hasattr(self,'chk_save_wget_stderr'): self.chk_save_wget_stderr.setChecked(bool(data.get('save_wget_stderr')))
             if hasattr(self,'chk_insecure_tls'): self.chk_insecure_tls.setChecked(bool(data.get('insecure')))
+            if hasattr(self,'chk_resilient'): self.chk_resilient.setChecked(bool(data.get('resilient')))
+            if hasattr(self,'chk_relaxed_tls'): self.chk_relaxed_tls.setChecked(bool(data.get('relaxed_tls')))
+            if hasattr(self,'chk_allow_degraded'): self.chk_allow_degraded.setChecked(bool(data.get('allow_degraded')))
+            if hasattr(self,'chk_adaptive_conc'): self.chk_adaptive_conc.setChecked(bool(data.get('adaptive_concurrency')))
+            if hasattr(self,'chk_verbose_wget'): self.chk_verbose_wget.setChecked(bool(data.get('verbose_wget')))
+            if hasattr(self,'chk_enable_auto_retry'): self.chk_enable_auto_retry.setChecked(bool(data.get('enable_auto_retry')))
+            if hasattr(self,'spin_max_attempts'):
+                try: self.spin_max_attempts.setValue(int(data.get('max_attempts',3)))
+                except Exception: pass
+            if hasattr(self,'chk_ai_assist'): self.chk_ai_assist.setChecked(bool(data.get('ai_assist')))
+            if hasattr(self,'ai_endpoint_in'): self.ai_endpoint_in.setText(data.get('ai_endpoint',''))
+            if hasattr(self,'ai_api_key_in'): self.ai_api_key_in.setText(data.get('ai_api_key',''))
+            if hasattr(self,'spin_failure_threshold'):
+                try: self.spin_failure_threshold.setValue(float(data.get('failure_threshold',0.15)))
+                except Exception: pass
             # Refresh wizard availability after loading profile
             try:
                 self.btn_wizard.setEnabled(bool(self.url_in.text().strip()))
@@ -837,6 +1130,11 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         """Two-phase wizard: (1) Scan (dry-run heuristics) (2) Results with Apply/Cancel.
         If running in offscreen test mode, run synchronously for deterministic tests."""
         url=self.url_in.text().strip()
+        # Normalize bare host (add https://). Update field so subsequent actions reuse normalized form.
+        if url and '://' not in url:
+            url_norm='https://'+url
+            self.url_in.setText(url_norm)
+            url=url_norm
         if not url:
             QMessageBox.information(self,'Wizard','Enter a URL first.')
             return
@@ -976,8 +1274,13 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         dlg.exec()
 
     def _build_config(self)->CloneConfig:
+        # Ensure URL normalized (prepend https:// if missing) prior to building config
+        raw_url=self.url_in.text().strip()
+        if raw_url and '://' not in raw_url:
+            raw_url='https://'+raw_url
+            self.url_in.setText(raw_url)
         cfg = CloneConfig(
-            url=self.url_in.text().strip(), dest=self.dest_in.text().strip(), docker_name=self.name_in.text().strip() or 'site',
+            url=raw_url, dest=self.dest_in.text().strip(), docker_name=self.name_in.text().strip() or 'site',
             build=self.chk_build.isChecked(), bind_ip=self.ip_in.text().strip() or '127.0.0.1', host_port=self.host_port.value(), container_port=self.cont_port.value(),
             size_cap=self.size_cap.text().strip() or None, throttle=self.throttle.text().strip() or None,
             jobs=(self.spin_threads.value() if hasattr(self,'spin_threads') else 0),
@@ -998,11 +1301,20 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             auto_backoff=self.chk_auto_backoff.isChecked() if hasattr(self,'chk_auto_backoff') else False,
             log_redirect_chain=self.chk_log_redirect_chain.isChecked() if hasattr(self,'chk_log_redirect_chain') else False,
             save_wget_stderr=self.chk_save_wget_stderr.isChecked() if hasattr(self,'chk_save_wget_stderr') else False
-            ,insecure=self.chk_insecure_tls.isChecked() if hasattr(self,'chk_insecure_tls') else False, routing_mode=self.routing_mode_box.currentText()
+            ,insecure=(self.chk_insecure_tls.isChecked() or self.chk_relaxed_tls.isChecked()) if hasattr(self,'chk_insecure_tls') else False, routing_mode=self.routing_mode_box.currentText(),
+            resilient=self.chk_resilient.isChecked() if hasattr(self,'chk_resilient') else False,
+            relaxed_tls=self.chk_relaxed_tls.isChecked() if hasattr(self,'chk_relaxed_tls') else False,
+            failure_threshold=self.spin_failure_threshold.value() if hasattr(self,'spin_failure_threshold') else 0.15,
+            allow_degraded=self.chk_allow_degraded.isChecked() if hasattr(self,'chk_allow_degraded') else False,
+            adaptive_concurrency=self.chk_adaptive_conc.isChecked() if hasattr(self,'chk_adaptive_conc') else False,
+            verbose_wget=self.chk_verbose_wget.isChecked() if hasattr(self,'chk_verbose_wget') else False
         )
         setattr(cfg,'cleanup', self.chk_cleanup.isChecked())
         return cfg
     def start_clone(self):
+        # Normalize URL field before validation so validation & history use canonical form
+        if self.url_in.text().strip() and '://' not in self.url_in.text().strip():
+            self.url_in.setText('https://'+self.url_in.text().strip())
         # original validation logic remains
         allow_raw=self.router_allow.text().strip(); deny_raw=self.router_deny.text().strip(); bad=[]; import re as _re
         for label,raw in (('allow',allow_raw),('deny',deny_raw)):
@@ -1017,7 +1329,17 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
             QMessageBox.warning(self,'Port In Use',f'Host port {cfg.host_port} already in use.'); return
         if cfg.build and not docker_available(): QMessageBox.warning(self,'Docker Missing','Docker is not available.'); return
         self.console.clear(); self._set_running(True); self._paused=False; self.btn_pause.setText('Pause')
-        cb=_GuiCallbacks(self); self.worker=_CloneWorker(cfg,cb); self._init_weighting(cfg); self.worker.finished.connect(self._clone_finished); self.worker.start(); self._on_log('[gui] clone started')
+        cb=_GuiCallbacks(self); self._init_weighting(cfg)
+        if hasattr(self,'chk_enable_auto_retry') and self.chk_enable_auto_retry.isChecked():
+            attempts = self.spin_max_attempts.value() if hasattr(self,'spin_max_attempts') else 3
+            ai_assist = self.chk_ai_assist.isChecked() if hasattr(self,'chk_ai_assist') else False
+            ai_ep = self.ai_endpoint_in.text().strip() if hasattr(self,'ai_endpoint_in') else ''
+            ai_key = self.ai_api_key_in.text().strip() if hasattr(self,'ai_api_key_in') else ''
+            self.worker=_AutoRetryWorker(cfg, cb, attempts, ai_assist, ai_ep, ai_key)
+            self._on_log(f'[gui] auto-retry enabled (attempts={attempts} ai_assist={ai_assist})')
+        else:
+            self.worker=_CloneWorker(cfg,cb)
+        self.worker.finished.connect(self._clone_finished); self.worker.start(); self._on_log('[gui] clone started')
 
     def _cancel_clone(self):
         if self.worker and self.worker.isRunning():
@@ -1039,6 +1361,36 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
         else:
             self.status_lbl.setText('Clone FAILED')
         if result and getattr(result,'output_folder',None): self.console.append(f"Output: {result.output_folder}")
+        # Post-run heuristic: if only one HTML page captured and prerender off, suggest enabling dynamic mode
+        try:
+            if (result and getattr(result,'output_folder',None) and not self.chk_prerender.isChecked() and not self._dynamic_hint_shown):
+                import os
+                html_count=0
+                for root,_,files in os.walk(result.output_folder):
+                    for f in files:
+                        if f.lower().endswith(('.html','.htm')):
+                            # Ignore common Next.js internal build files (rarely have .html; still keep simple)
+                            html_count+=1
+                            if html_count>1:
+                                break
+                    if html_count>1:
+                        break
+                if html_count<=1:
+                    from PySide6.QtWidgets import QMessageBox
+                    resp=QMessageBox.question(self,'Dynamic Content Detected?',
+                        'Only one HTML page was captured. This site likely requires dynamic rendering (Next.js / client navigation).\n\nEnable Prerender + Router Intercept and retry?')
+                    if resp==QMessageBox.StandardButton.Yes:
+                        try:
+                            self.chk_prerender.setChecked(True)
+                            self.chk_router.setChecked(True)
+                            # Suggest moderate thread count
+                            if hasattr(self,'spin_threads') and self.spin_threads.value()>12:
+                                self.spin_threads.setValue(8)
+                            self.console.append('[hint] Dynamic capture enabled (prerender + router intercept). Re-run Clone.')
+                        except Exception: pass
+                    self._dynamic_hint_shown=True
+        except Exception:
+            pass
 
     def _on_log(self,msg:str):
         # Attempt to parse JSON events to surface structured info
@@ -1071,10 +1423,41 @@ QPushButton:disabled { background:#2e2e2e; color:#888; border-color:#3a3a3a; }
                         if evt.get('total_seconds') is not None:
                             rows.append(f"  total: {evt.get('total_seconds')}s")
                         self.console.append('[timings]\n'+'\n'.join(rows))
+                elif et in ('clone_fail_stats','clone_fail_stats_second'):
+                    phase_lbl = 'initial' if et=='clone_fail_stats' else 'second'
+                    ratio = evt.get('error_ratio')
+                    self.console.append(f"[quality] {phase_lbl} pass failure ratio={ratio:.2%} http4xx={evt.get('http_4xx')} http5xx={evt.get('http_5xx')} dns={evt.get('dns_errors')} tls={evt.get('tls_errors')} other={evt.get('other_errors')}")
+                elif et=='clone_quality':
+                    if evt.get('degraded'):
+                        self.console.append(f"[quality] clone degraded (error_ratio={evt.get('error_ratio'):.2%})")
+                    else:
+                        self.console.append(f"[quality] clone quality OK (error_ratio={evt.get('error_ratio'):.2%})")
                 # fall through still prints raw JSON for transparency
             except Exception:
                 pass
         self.console.append(msg); self.console.ensureCursorVisible()
+        # Forward log to AI chat (passive) if dialog open (watch mode triggers internal scheduling)
+        if getattr(self,'_ai_chat_dialog',None):
+            try: self._ai_chat_dialog.on_new_log(msg)
+            except Exception: pass
+        # Detect repeated wget2 malformed port messages early and guide user
+        if 'Port number must be in the range 1..65535' in msg:
+            self._port_error_count+=1
+            if self._port_error_count>=4 and not self._port_error_notified:
+                self._port_error_notified=True
+                if not self.chk_prerender.isChecked():
+                    from PySide6.QtWidgets import QMessageBox
+                    try:
+                        resp=QMessageBox.question(self,'Malformed URLs Detected',
+                            'Repeated invalid port URLs observed. This often occurs on dynamic / JS-rendered sites when using static mode.\n\nEnable Prerender + Router Intercept now and auto-retry?')
+                        if resp==QMessageBox.StandardButton.Yes:
+                            self.chk_prerender.setChecked(True)
+                            self.chk_router.setChecked(True)
+                            if hasattr(self,'spin_threads') and self.spin_threads.value()>12:
+                                self.spin_threads.setValue(8)
+                            self.console.append('[hint] Enabled dynamic mode due to malformed port errors. Click Clone again.')
+                    except Exception:
+                        pass
     def _on_phase(self,phase:str,pct:int): self._update_weighted_progress(phase,pct)
     def _update_metric(self,rate=None,api=None,router=None,chk=None):
         parts=[]

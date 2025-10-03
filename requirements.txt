@@ -48,3 +48,10 @@ httpx
 # We keep them separate to keep the base environment slim.
 #############################
 # (See generated requirements-dev.txt you can create if desired.)
+
+#############################
+# Optional: AI Assist adapter (local service)
+# Only needed if you run ai_adapter.py for OpenRouter integration
+#############################
+fastapi
+uvicorn

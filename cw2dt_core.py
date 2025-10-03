@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, Dict
 from typing import Optional, Callable, List, Dict, Any
 
-__version__ = "1.1.7"
+__version__ = "1.1.8"
 
 # ---------------- Exit Codes & Schema ----------------
 # These provide stable semantics for automation / CI integration.
@@ -397,6 +397,22 @@ def parse_size_to_bytes(text: str) -> int | None:
         return int(float(t))
     except Exception: return None
 def parse_rate_to_bps(text: str) -> int | None: return parse_size_to_bytes(text)
+
+# ---------------- Adaptive Concurrency Helpers -----------------
+def compute_adaptive_reduction(error_lines: int, total_lines: int, current_jobs: int, already_reduced: bool, threshold: float = 0.22) -> int | None:
+    """Decide whether to reduce concurrency mid-run.
+    Trigger once when error density (HTTP 5xx / 429) exceeds threshold after enough samples.
+    """
+    if already_reduced:
+        return None
+    if total_lines < 120:
+        return None
+    if current_jobs <= 6:
+        return None
+    ratio = error_lines / max(1,total_lines)
+    if ratio >= threshold:
+        return max(4, current_jobs // 2)
+    return None
 
 # --- prerender (optional) ---
 def _run_prerender(start_url: str, site_root: str, output_folder: str, max_pages: int = 40,
@@ -943,6 +959,12 @@ class CloneConfig:
     save_wget_stderr: bool = False          # persist full wget2 stderr to file for diagnostics
     insecure: bool = False                  # ignore TLS certificate validation (diagnostic / insecure)
     routing_mode: str = 'strict'            # 'strict' | 'spa' | 'ext' | 'hybrid'
+    resilient: bool = False                 # broader retry/timeouts from first attempt
+    relaxed_tls: bool = False               # imply insecure plus disable keep-alive etc.
+    failure_threshold: float = 0.15         # error ratio threshold
+    allow_degraded: bool = False            # keep success True even if failure ratio high
+    adaptive_concurrency: bool = False      # experimental concurrency reduction (placeholder)
+    verbose_wget: bool = False              # stream raw wget2 stderr lines into GUI/CLI log for transparency
     # internal cancellation hook (GUI injects)
     cancel_event: Any = None
     # internal / reserved
@@ -1028,8 +1050,16 @@ def _invoke(cb, name: str, *a):
         try: fn(*a)
         except Exception: pass
 
-def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Optional[str]=None) -> bool:
-    """Run wget2 streaming stderr to parse percentage + bandwidth, with enhanced diagnostics."""
+def _wget2_progress_run(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Optional[str]=None, stream_raw: bool=False,
+                        adaptive_tracker: Optional[dict]=None) -> bool:
+    """Run wget2 streaming stderr to parse percentage + bandwidth, with enhanced diagnostics.
+
+    Args:
+        cmd: Full wget2 command vector.
+        cb: Callback interface for progress/logging.
+        save_path: Optional path to append full stderr log.
+        stream_raw: When True, emit each raw stderr line to log (prefixed) for verbose transparency.
+    """
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
     except FileNotFoundError:
@@ -1052,6 +1082,8 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
             except Exception: pass
             if not line: continue
             ln=line.rstrip(); last_lines.append(ln)
+            if stream_raw and ln:  # surface raw line for verbose mode (helps diagnosing malformed URLs / ports)
+                _invoke(cb,'log',f"[wget2] {ln}")
             if save_path:
                 try:
                     with open(save_path,'a',encoding='utf-8') as sf: sf.write(line)
@@ -1072,6 +1104,11 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
                     break
             if 's' in line:
                 m=speed_re.search(line)
+            # Adaptive tracking (collect counts)
+            if adaptive_tracker is not None:
+                adaptive_tracker['lines'] += 1
+                if any(sig in ln for sig in (' 500',' 502',' 503',' 504',' 429')):
+                    adaptive_tracker['err_lines'] += 1
                 if m:
                     unit=m.group('unit') or ''; val=m.group('val'); rate=f"{val}{unit}B/s" if unit else f"{val}B/s"; now=time.time()
                     if (rate!=last_rate) and (now-last_rate_time)>0.25:
@@ -1124,6 +1161,42 @@ def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Opt
     if last_pct<100: _invoke(cb,'phase','clone',100)
     _invoke(cb,'log',f"[clone] elapsed {round(time.time()-start,2)}s")
     return True
+
+def _wget2_progress(cmd: List[str], cb: Optional[CloneCallbacks], save_path: Optional[str]=None, stream_raw: bool=False,
+                    adaptive_enabled: bool=False, current_jobs: int=0, structured_event_cb=None) -> bool:
+    """Wrapper adding a single mid-run adaptive restart opportunity.
+
+    Returns True on success, False otherwise. If adaptive criteria triggers, we terminate the first
+    wget2 run early, halve concurrency, and re-run once.
+    """
+    tracker={'lines':0,'err_lines':0}
+    ok=_wget2_progress_run(cmd, cb, save_path=save_path, stream_raw=stream_raw,
+                           adaptive_tracker=(tracker if adaptive_enabled else None))
+    if ok:
+        return True
+    # If failed but not adaptive enabled, pass through
+    if not adaptive_enabled:
+        return False
+    # Decide if concurrency reduction warranted
+    new_jobs = compute_adaptive_reduction(tracker.get('err_lines',0), tracker.get('lines',0), current_jobs, already_reduced=False)
+    if not new_jobs or new_jobs >= current_jobs:
+        return False
+    # Rebuild command removing existing thread flag
+    reduced_cmd=[t for t in cmd if not t.startswith('--max-threads=') and not t.startswith('--jobs=')]
+    # Choose flag present in original or default to --max-threads
+    flag='--max-threads'
+    for t in cmd:
+        if t.startswith('--jobs='): flag='--jobs'; break
+        if t.startswith('--max-threads='): flag='--max-threads'; break
+    reduced_cmd.append(f"{flag}={new_jobs}")
+    _invoke(cb,'log',f"[adaptive] restarting wget2 with reduced concurrency {current_jobs}->{new_jobs}")
+    try:
+        if callable(structured_event_cb):
+            try: structured_event_cb({'event':'adaptive_concurrency_adjust','stage':'restart','old_jobs':current_jobs,'new_jobs':new_jobs,'err_ratio': tracker.get('err_lines',0)/max(1,tracker.get('lines',0))})
+            except Exception: pass
+    except Exception:
+        pass
+    return _wget2_progress_run(reduced_cmd, cb, save_path=save_path, stream_raw=stream_raw, adaptive_tracker=None)
 
 def _build_repro_command_from_config(cfg: CloneConfig) -> list[str]:
     """Approximate reproduction command using provided config (mirrors legacy GUI summary logic)."""
@@ -1405,7 +1478,28 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
             log(f"[resume] before: files={pre_total} partials={pre_partials}")
     except Exception:
         pass
+    # Normalize URL scheme early (avoid bare host causing inconsistent origin parsing downstream)
+    if '://' not in cfg.url:
+        cfg.url = 'https://' + cfg.url.strip()
     wget_cmd = [ 'wget2','-e','robots=off','--mirror','--convert-links','--adjust-extension','--page-requisites','--no-parent','--continue','--progress=dot:mega', cfg.url,'-P', output_folder ]
+    # Resilient first-pass network hardening
+    if getattr(cfg,'resilient',False):
+        # Broader retry set & sensible timeouts even before any failure
+        if not any(a.startswith('--retry-on-http-error') for a in wget_cmd):
+            wget_cmd.append('--retry-on-http-error=403,404,408,429,500,502,503,504')
+        if not any(a.startswith('--tries=') or a=='--tries' for a in wget_cmd):
+            wget_cmd.append('--tries=4')
+        if not any(a.startswith('--waitretry=') for a in wget_cmd):
+            wget_cmd.append('--waitretry=3')
+        if '--timeout=' not in ' '.join(wget_cmd):
+            wget_cmd.append('--timeout=25')
+        # Connection refusal / transient network
+        wget_cmd.append('--retry-connrefused')
+        # Reduce failure impact of partial TLS / persistent sockets if relaxed_tls
+    if getattr(cfg,'relaxed_tls',False):
+        if '--no-http-keep-alive' not in wget_cmd: wget_cmd.append('--no-http-keep-alive')
+        if '--no-cache' not in wget_cmd: wget_cmd.append('--no-cache')
+        # Combined with insecure already set later
     if isinstance(getattr(cfg,'user_agent',None),str) and cfg.user_agent:
         wget_cmd += ['--user-agent', cfg.user_agent]
     if getattr(cfg,'insecure',False):  # diagnostic / insecure mode
@@ -1480,6 +1574,26 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                 pass
         else:
             log('[warn] wget2 concurrency flag not detected (no --max-threads / --jobs in help); using default threading.')
+    # Adaptive concurrency (experimental): if enabled and high initial job count, pre‑emptively scale down
+    # and ensure auto_backoff path is active for quality-based second attempts.
+    try:
+        if getattr(cfg,'adaptive_concurrency',False):
+            if not getattr(cfg,'auto_backoff',False):
+                cfg.auto_backoff = True
+                log('[adaptive] enabling auto_backoff (required for adaptive quality retries)')
+            if cfg.jobs and cfg.jobs > 32:
+                new_jobs = 24
+                log(f"[adaptive] reducing initial jobs {cfg.jobs}->${new_jobs} (preemptive)")
+                # Remove previously appended concurrency token if present then re-add
+                wget_cmd[:] = [t for t in wget_cmd if not t.startswith('--max-threads=') and not t.startswith('--jobs=')]
+                if _wget2_supports('--max-threads'):
+                    wget_cmd.append(f"--max-threads={new_jobs}")
+                elif _wget2_supports('--jobs'):
+                    wget_cmd.append(f"--jobs={new_jobs}")
+                try: cfg.jobs = new_jobs  # reflect in manifest
+                except Exception: pass
+    except Exception:
+        pass
     # Append any extra raw wget args (advanced troubleshooting)
     extra_args_val = getattr(cfg,'extra_wget_args',None)
     if isinstance(extra_args_val,str) and extra_args_val.strip():
@@ -1530,26 +1644,85 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         try:
             if os.path.exists(stderr_save): os.remove(stderr_save)
         except Exception: pass
-    success=_wget2_progress(wget_cmd, callbacks, save_path=stderr_save)
+    success=_wget2_progress(wget_cmd, callbacks, save_path=stderr_save, stream_raw=getattr(cfg,'verbose_wget',False),
+                            adaptive_enabled=getattr(cfg,'adaptive_concurrency',False), current_jobs=getattr(cfg,'jobs',0),
+                            structured_event_cb=lambda p: j(p.get('event','adaptive'), **{k:v for k,v in p.items() if k!='event'}))
+    # Analyze stderr for failure metrics (even on success we may want ratio)
+    failure_stats={}
+    def _parse_wget_stderr(path:str)->dict:
+        stats={'http_4xx':0,'http_5xx':0,'dns_errors':0,'tls_errors':0,'other_errors':0,'total_urls':0}
+        try:
+            import re
+            if not os.path.exists(path): return stats
+            with open(path,'r',encoding='utf-8',errors='ignore') as sf:
+                for line in sf:
+                    l=line.strip()
+                    if not l: continue
+                    # crude URL fetched heuristic
+                    if l.startswith('URL:') or ' -> ' in l:
+                        stats['total_urls']+=1
+                    if 'ERROR 4' in l or re.search(r'ERROR (40[0-9])', l):
+                        stats['http_4xx']+=1
+                    elif 'ERROR 5' in l or re.search(r'ERROR (50[0-9])', l):
+                        stats['http_5xx']+=1
+                    elif 'TLS handshake' in l or 'certificate' in l.lower():
+                        stats['tls_errors']+=1
+                    elif 'Name or service not known' in l or 'Temporary failure in name resolution' in l or 'DNS error' in l:
+                        stats['dns_errors']+=1
+                    elif 'ERROR' in l:
+                        stats['other_errors']+=1
+        except Exception:
+            pass
+        return stats
+    if stderr_save and os.path.exists(stderr_save):
+        failure_stats=_parse_wget_stderr(stderr_save)
+        # Compute ratio (consider only HTTP + dns + tls + other over max(total_urls,1))
+        denom=max(failure_stats.get('total_urls',0),1)
+        err_sum=failure_stats['http_4xx']+failure_stats['http_5xx']+failure_stats['dns_errors']+failure_stats['tls_errors']+failure_stats['other_errors']
+        failure_stats['error_ratio']=err_sum/denom
+        j('clone_fail_stats', **failure_stats)
+    adaptive_second=False
     if not success and getattr(cfg,'auto_backoff',False) and cfg.jobs and cfg.jobs>4:
-        # Retry once with reduced threads + generic retry args (unless user already supplied retry flags)
         log('[backoff] initial clone failed – attempting single reduced-concurrency retry...')
         reduced=max(2, int(cfg.jobs/2))
-        # Remove previous concurrency token and add new one
         wget_cmd=[t for t in wget_cmd if not t.startswith('--max-threads=') and not t.startswith('--jobs=')]
         if _wget2_supports('--max-threads'):
             wget_cmd.append(f"--max-threads={reduced}")
         elif _wget2_supports('--jobs'):
             wget_cmd.append(f"--jobs={reduced}")
-        # Add retry args if none present
         if not any('--retry-on-http-error' in t for t in wget_cmd):
             wget_cmd += ['--retry-on-http-error=429,500,503']
-        if not any('--tries=' in t or t=='--tries' for t in wget_cmd):
-            wget_cmd.append('--tries=3')
-        if not any('--waitretry=' in t or t=='--waitretry' for t in wget_cmd):
-            wget_cmd.append('--waitretry=2')
+        if not any('--tries=' in t or t=='--tries' for t in wget_cmd): wget_cmd.append('--tries=3')
+        if not any('--waitretry=' in t or t=='--waitretry' for t in wget_cmd): wget_cmd.append('--waitretry=2')
         log(f"[backoff] retry command adjustments: threads={reduced}")
-        success=_wget2_progress(wget_cmd, callbacks, save_path=stderr_save)
+        success=_wget2_progress(wget_cmd, callbacks, save_path=stderr_save, stream_raw=getattr(cfg,'verbose_wget',False),
+                                adaptive_enabled=False, current_jobs=reduced)
+        adaptive_second=True
+    # Adaptive retry based on failure ratio even if first run reported success
+    if success and failure_stats and failure_stats.get('error_ratio',0) > getattr(cfg,'failure_threshold',0.15) and getattr(cfg,'auto_backoff',False):
+        log(f"[quality] High error ratio {failure_stats['error_ratio']:.2%} > threshold; adaptive second attempt")
+        # Concurrency reduction
+        if cfg.jobs and cfg.jobs>2:
+            wget_cmd=[t for t in wget_cmd if not t.startswith('--max-threads=') and not t.startswith('--jobs=')]
+            reduced=max(2,int(cfg.jobs/2))
+            if _wget2_supports('--max-threads'):
+                wget_cmd.append(f"--max-threads={reduced}")
+            elif _wget2_supports('--jobs'):
+                wget_cmd.append(f"--jobs={reduced}")
+        # Strengthen retry flags
+        if not any('--retry-on-http-error' in t for t in wget_cmd):
+            wget_cmd.append('--retry-on-http-error=403,404,408,429,500,502,503,504')
+        if not any('--tries=' in t or t=='--tries' for t in wget_cmd): wget_cmd.append('--tries=4')
+        if not any('--waitretry=' in t or t=='--waitretry' for t in wget_cmd): wget_cmd.append('--waitretry=3')
+        if '--timeout=' not in ' '.join(wget_cmd): wget_cmd.append('--timeout=25')
+        wget_cmd.append('--retry-connrefused')
+        adaptive_second=True
+    if stderr_save and os.path.exists(stderr_save):
+        failure_stats=_parse_wget_stderr(stderr_save)
+        denom=max(failure_stats.get('total_urls',0),1)
+        err_sum=failure_stats['http_4xx']+failure_stats['http_5xx']+failure_stats['dns_errors']+failure_stats['tls_errors']+failure_stats['other_errors']
+        failure_stats['error_ratio']=err_sum/denom
+        j('clone_fail_stats_second', **failure_stats)
     if not success:
         if _canceled('clone'):
             j('summary', success=False, canceled=True)
@@ -1557,7 +1730,20 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         j('summary', success=False, canceled=False, error='clone_failed')
         return CloneResult(False, False, output_folder, output_folder, None, None, {})
     t_clone = time.time()
+    # Determine degraded quality
     clone_success_flag = True
+    degraded=False
+    if failure_stats and failure_stats.get('error_ratio',0) > getattr(cfg,'failure_threshold',0.15):
+        degraded=True
+        if not getattr(cfg,'allow_degraded',False):
+            clone_success_flag = False
+            log(f"[quality] Marking clone failed due to high error ratio {failure_stats['error_ratio']:.2%}")
+        else:
+            log(f"[quality] High error ratio {failure_stats['error_ratio']:.2%} but allowed (allow_degraded)")
+    if degraded:
+        j('clone_quality', degraded=True, error_ratio=failure_stats.get('error_ratio'))
+    else:
+        j('clone_quality', degraded=False, error_ratio=failure_stats.get('error_ratio',0.0))
     j('phase_end', phase='clone')
     site_root = find_site_root(output_folder)
     # Post-clone resume delta
@@ -1752,23 +1938,43 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         except Exception as e:
             log(f"[js] strip failed: {e}")
 
-    # Post-processing link rewrite: convert absolute internal https://host/... links to relative paths (/...)
-    # This ensures navigation in the local clone (served or inside container) stays on the cloned content.
-    rewrite_internal_links_stats={'processed':0,'rewritten':0}
+    # Post-processing link rewrite & normalization.
+    # 1. Convert absolute internal https://host/... links to root-relative paths (/...)
+    # 2. Collapse malformed scheme remnants (https:///path -> /path) produced by earlier host stripping
+    # 3. In strict routing mode, optionally append .html to extensionless internal links when the file exists
+    rewrite_internal_links_stats={'processed':0,'rewritten':0,'collapsed':0,'ext_added':0}
     if getattr(cfg,'rewrite_urls',True):
         try:
             from urllib.parse import urlparse as _urlparse
-            origin_parts=_urlparse(cfg.url)
+            origin_parts=_urlparse(cfg.url if '://' in cfg.url else f'https://{cfg.url}')
             origin_host=origin_parts.netloc.lower()
             internal_hosts={origin_host}
             if origin_host.startswith('www.'):
                 internal_hosts.add(origin_host[4:])
             else:
                 internal_hosts.add('www.'+origin_host)
-            # helper regex for attributes (href/src/action) & CSS url()
             import re as _re
             attr_pattern=_re.compile(r'(href|src|action)=("|\')(?:https?:)?//([^/\"\'>]+)(/[^\"\'> ]*)?("|\')', _re.IGNORECASE)
             css_url_pattern=_re.compile(r'url\(("|\')?(?:https?:)?//([^/\)"\']+)(/[^\)"\']*)("|\')?\)', _re.IGNORECASE)
+            collapse_scheme_pattern=_re.compile(r'((?:href|src|action)=)("|\')https?:///+([^"\'>]+)("|\')', _re.IGNORECASE)
+            # Collect top-level html page names for extensionless mapping (strict mode only)
+            routing_mode=(getattr(cfg,'routing_mode','strict') or 'strict').lower()
+            top_level_html=set()
+            if routing_mode=='strict':
+                try:
+                    for _b,_d,_f in os.walk(site_root):
+                        for _fn in _f:
+                            if _fn.lower().endswith('.html'):
+                                rel=os.path.relpath(os.path.join(_b,_fn), site_root)
+                                if '/' not in rel:  # root only
+                                    top_level_html.add(_fn[:-5])  # strip .html
+                        # Do not descend further than root for top-level collection
+                        break
+                except Exception:
+                    pass
+            # Regex to locate extensionless internal anchors (strict mode)
+            extless_pattern=_re.compile(r'(href)=("|\')(/([a-z0-9\-]+))("|\')', _re.IGNORECASE)
+
             for base,_,files in os.walk(site_root):
                 for fn in files:
                     if not fn.lower().endswith(('.html','.htm','.css')): continue
@@ -1778,13 +1984,12 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                     except Exception:
                         continue
                     original=txt
+                    # Phase 1: host -> relative
                     def _attr_sub(m):
-                        full_host=m.group(3).lower()
-                        path=m.group(4) or '/'
+                        full_host=m.group(3).lower(); path=m.group(4) or '/'
                         if full_host in internal_hosts:
-                            repl=f"{m.group(1)}={m.group(2)}{path}{m.group(5)}"
                             rewrite_internal_links_stats['rewritten']+=1
-                            return repl
+                            return f"{m.group(1)}={m.group(2)}{path}{m.group(5)}"
                         return m.group(0)
                     txt=attr_pattern.sub(_attr_sub, txt)
                     def _css_sub(m):
@@ -1793,17 +1998,34 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
                             rewrite_internal_links_stats['rewritten']+=1
                             return f"url({path})"
                         return m.group(0)
-                    # Only apply css_url_pattern for .css or inline styles in html
                     if fn.lower().endswith('.css') or 'url(' in txt:
                         txt=css_url_pattern.sub(_css_sub, txt)
+                    # Phase 2: collapse malformed schemes (https:///path -> /path)
+                    before_collapse=txt
+                    def _collapse(m):
+                        rewrite_internal_links_stats['collapsed']+=1
+                        return f"{m.group(1)}{m.group(2)}/{m.group(3)}{m.group(4)}" if m.group(3).startswith('/') else f"{m.group(1)}{m.group(2)}/{m.group(3)}{m.group(4)}"
+                    txt=collapse_scheme_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}/{m.group(3)}{m.group(4)}", txt)
+                    # Additionally replace any stray http:/// or https:/// not inside attributes (rare) -> /
+                    txt=_re.sub(r'https?:///+','/', txt)
+                    # Phase 3: strict mode extensionless -> .html mapping
+                    if routing_mode=='strict' and top_level_html:
+                        def _extless(m):
+                            path_no_slash=m.group(3).lstrip('/')
+                            name=path_no_slash.split('/',1)[0]
+                            if name in top_level_html and name not in ('index','favicon') and '.' not in name:
+                                rewrite_internal_links_stats['ext_added']+=1
+                                return f"{m.group(1)}={m.group(2)}{m.group(3)}.html{m.group(5)}"
+                            return m.group(0)
+                        txt=extless_pattern.sub(_extless, txt)
                     if txt!=original:
                         try:
                             with open(p,'w',encoding='utf-8') as f: f.write(txt)
                         except Exception:
                             pass
                     rewrite_internal_links_stats['processed']+=1
-            log(f"[rewrite] internal link rewrite complete: files={rewrite_internal_links_stats['processed']} updated={rewrite_internal_links_stats['rewritten']}")
-            j('rewrite_links', processed=rewrite_internal_links_stats['processed'], rewritten=rewrite_internal_links_stats['rewritten'])
+            log(f"[rewrite] internal link normalization complete: files={rewrite_internal_links_stats['processed']} replaced={rewrite_internal_links_stats['rewritten']} collapsed={rewrite_internal_links_stats['collapsed']} ext_added={rewrite_internal_links_stats['ext_added']}")
+            j('rewrite_links', **rewrite_internal_links_stats)
         except Exception as e:
             log(f"[rewrite] internal link rewrite skipped: {e}")
             try: j('rewrite_links', error=str(e))
@@ -2541,6 +2763,11 @@ def headless_main(argv: list[str]) -> int:
     parser.add_argument('--save-wget-stderr', action='store_true', help='Save full wget2 stderr to file (wget_stderr.log) in output folder')
     parser.add_argument('--insecure', action='store_true', help='IGNORE TLS certificate validation (adds --no-check-certificate to wget2). Diagnostic-only; do not use routinely.')
     parser.add_argument('--routing-mode', choices=['strict','spa','ext','hybrid'], default='strict', help='Routing: strict(404), spa(fallback /index.html), ext(extensionless .html), hybrid(ext then SPA)')
+    parser.add_argument('--resilient', action='store_true', help='Enable broader retry set & sturdier network flags on first attempt')
+    parser.add_argument('--relaxed-tls', action='store_true', help='Apply TLS fallback set (also implies --insecure)')
+    parser.add_argument('--failure-threshold', type=float, default=0.15, help='Error ratio triggering adaptive retry (0-1)')
+    parser.add_argument('--allow-degraded', action='store_true', help='Do not mark clone failed if error ratio exceeds threshold')
+    parser.add_argument('--adaptive-concurrency', action='store_true', help='Experimental: lower concurrency if high error rate detected')
     args = parser.parse_args(argv)
 
     if args.selftest_verification:
@@ -2595,7 +2822,8 @@ def headless_main(argv: list[str]) -> int:
         plugins_dir=args.plugins_dir, json_logs=args.json_logs, profile=args.profile, open_browser=args.open_browser,
     run_built=args.run_built, serve_folder=args.serve_folder, cleanup=args.cleanup,
     events_file=args.events_file, progress_mode=args.progress, user_agent=args.user_agent, extra_wget_args=args.extra_wget_args,
-    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr, insecure=args.insecure, routing_mode=args.routing_mode
+    auto_backoff=args.auto_backoff, log_redirect_chain=args.log_redirect_chain, save_wget_stderr=args.save_wget_stderr, insecure=(args.insecure or args.relaxed_tls), routing_mode=args.routing_mode,
+    resilient=args.resilient, relaxed_tls=args.relaxed_tls, failure_threshold=args.failure_threshold, allow_degraded=args.allow_degraded, adaptive_concurrency=args.adaptive_concurrency
     )
     if args.print_repro:
         repro=_build_repro_command_from_config(cfg)
