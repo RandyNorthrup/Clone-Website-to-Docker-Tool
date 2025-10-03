@@ -15,7 +15,7 @@ Design goals:
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import json, urllib.request, urllib.error, time, copy
 
 from cw2dt_core import clone_site, CloneConfig, CloneResult, CloneCallbacks
@@ -27,6 +27,48 @@ ADJUSTABLE_FIELDS = {
     'capture_api_binary','capture_graphql','checksums','verify_after','verify_deep',
     'prerender_max_pages','prerender_scroll'
 }
+
+# Rich field metadata to guide the AI (sent in payload). Keep descriptions concise.
+FIELD_METADATA: Dict[str, Dict[str, Any]] = {
+    'jobs': {'type':'int','min':2,'max':64,'hint':'concurrent download threads; reduce if rate limited'},
+    'resilient': {'type':'bool','hint':'broader timeouts/retries on first phases'},
+    'relaxed_tls': {'type':'bool','hint':'disable keep-alive/cache + insecure TLS (last resort for flaky TLS)'},
+    'failure_threshold': {'type':'float','min':0.05,'max':0.50,'hint':'error ratio threshold before quality degrade'},
+    'allow_degraded': {'type':'bool','hint':'preserve success despite high error ratio'},
+    'prerender': {'type':'bool','hint':'enable dynamic JS rendering via headless browser'},
+    'router_intercept': {'type':'bool','hint':'enumerate SPA client routes'},
+    'incremental': {'type':'bool','hint':'skip unchanged; reduces noise on subsequent attempts'},
+    'capture_api': {'type':'bool','hint':'collect API JSON responses during prerender'},
+    'capture_storage': {'type':'bool','hint':'snapshot local/session storage'},
+    'capture_api_binary': {'type':'bool','hint':'capture binary API responses (pdf/images)'},
+    'capture_graphql': {'type':'bool','hint':'capture GraphQL POST payloads'},
+    'checksums': {'type':'bool','hint':'generate file hashes for integrity'},
+    'verify_after': {'type':'bool','hint':'verify against checksum set immediately'},
+    'verify_deep': {'type':'bool','hint':'aggressive verification depth'},
+    'prerender_max_pages': {'type':'int','min':5,'max':1200,'hint':'cap dynamic pages (avoid runaway)'},
+    'prerender_scroll': {'type':'int','min':0,'max':30,'hint':'scroll passes per page for lazy content'}
+}
+
+def _risk_assess(current: Dict[str, Any], changes: Dict[str, Any]) -> Dict[str, str]:
+    """Lightweight risk heuristic mirroring (subset of) GUI chat logic."""
+    risks: Dict[str,str] = {}
+    try:
+        cur_jobs=int(current.get('jobs') or 0)
+    except Exception:
+        cur_jobs=0
+    nj=changes.get('jobs')
+    if isinstance(nj,(int,float)) and cur_jobs>0 and nj >= cur_jobs*2 and nj >= 8:
+        risks['jobs']=f'increase {cur_jobs}->{nj}'
+    cf=current.get('failure_threshold'); nf=changes.get('failure_threshold')
+    if isinstance(cf,(int,float)) and isinstance(nf,(int,float)) and (nf-cf>0.1 or nf>0.35):
+        risks['failure_threshold']=f'raised {cf}->{nf}'
+    if changes.get('relaxed_tls') and not current.get('relaxed_tls'):
+        risks['relaxed_tls']='relaxes TLS'
+    if current.get('checksums') and changes.get('checksums') is False:
+        risks['checksums']='disables checksums'
+    if current.get('verify_after') and changes.get('verify_after') is False:
+        risks['verify_after']='disables verify_after'
+    return risks
 
 class _BufferingCallbacks(CloneCallbacks):
     """Wrap underlying callbacks to capture recent log lines for AI context while forwarding."""
@@ -68,8 +110,8 @@ class AutoRetryManager:
         self.ai_endpoint = ai_endpoint.strip() if ai_endpoint else None
         self.ai_api_key = ai_api_key.strip() if ai_api_key else None
         self.attempts: List[Dict[str, Any]] = []  # metadata per attempt
-    # Optional structured event sink callable accepting a dict.
-    self.event_sink = None  # type: ignore
+        # Optional structured event sink callable accepting a dict (assigned at runtime by GUI)
+        self.event_sink = None  # type: ignore
 
     # ---------------- Heuristic Adjustments -----------------
     def _heuristic_adjust(self, cfg: CloneConfig, attempt_index: int, last_result: Optional[CloneResult], cb: CloneCallbacks) -> CloneConfig:
@@ -100,16 +142,23 @@ class AutoRetryManager:
         return cfg
 
     # ---------------- AI Assist -----------------
-    def _call_ai(self, cfg: CloneConfig, attempt_index: int, buffered_cb: _BufferingCallbacks, cb: CloneCallbacks) -> CloneConfig:
+    def _call_ai(self, cfg: CloneConfig, attempt_index: int, buffered_cb: _BufferingCallbacks, cb: CloneCallbacks) -> Tuple[CloneConfig, List[str], Optional[Dict[str,Any]]]:
         if not self.ai_assist or not self.ai_endpoint:
-            return cfg
+            return cfg, [], None
         payload = {
             'attempt': attempt_index+1,
             'max_attempts': self.max_attempts,
             'base_config': asdict(self.base),
             'current_config': asdict(cfg),
             'recent_logs': buffered_cb.tail(),
-            'adjustable_fields': sorted(list(ADJUSTABLE_FIELDS))
+            'adjustable_fields': sorted(list(ADJUSTABLE_FIELDS)),
+            'field_metadata': FIELD_METADATA,
+            'attempt_history': self.attempts,
+            'instruction': (
+                'Suggest only minimal, safe changes using adjustable_fields. '
+                'Prefer reducing jobs / enabling prerender / router_intercept for dynamic sites, '
+                'and adding capture flags only if clearly needed. Return JSON {"changes":{...}}.'
+            )
         }
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(self.ai_endpoint, data=data, method='POST', headers={'Content-Type': 'application/json'})
@@ -122,14 +171,14 @@ class AutoRetryManager:
                 js = json.loads(raw)
             except Exception:
                 cb.log('[auto][ai] invalid JSON response – ignoring')
-                return cfg
+                return cfg, [], None
             if not isinstance(js, dict):
                 cb.log('[auto][ai] response not an object – ignoring')
-                return cfg
+                return cfg, [], None
             changes = js.get('changes') or js  # allow direct dict
             if not isinstance(changes, dict):
                 cb.log('[auto][ai] changes missing or not an object – ignoring')
-                return cfg
+                return cfg, [], js if isinstance(js,dict) else None
             applied = []
             new_cfg = cfg
             for k,v in changes.items():
@@ -140,16 +189,22 @@ class AutoRetryManager:
                     except Exception:
                         continue
             if applied:
+                risks=_risk_assess(asdict(cfg), {k:changes[k] for k in changes if k in ADJUSTABLE_FIELDS})
+                if risks:
+                    cb.log('[auto][ai][risk] '+', '.join(f"{k}:{v}" for k,v in risks.items()))
                 cb.log('[auto][ai] applied: ' + ', '.join(applied))
-                self._emit({'event':'auto_retry_ai_applied','attempt':attempt_index+1,'changes':{k:v for k,v in changes.items() if k in ADJUSTABLE_FIELDS}})
-                return new_cfg
+                self._emit({'event':'auto_retry_ai_applied','attempt':attempt_index+1,'changes':{k:v for k,v in changes.items() if k in ADJUSTABLE_FIELDS},'risks':risks})
+                return new_cfg, applied, changes
             cb.log('[auto][ai] no valid changes proposed')
-            return new_cfg
+            self._emit({'event':'auto_retry_ai_no_changes','attempt':attempt_index+1,'raw':js})
+            return new_cfg, [], changes
         except urllib.error.URLError as e:
             cb.log(f'[auto][ai] request failed: {e}')
+            self._emit({'event':'auto_retry_ai_error','attempt':attempt_index+1,'error':str(e)})
         except Exception as e:
             cb.log(f'[auto][ai] unexpected error: {e}')
-        return cfg
+            self._emit({'event':'auto_retry_ai_error','attempt':attempt_index+1,'error':str(e)})
+        return cfg, [], None
 
     # ---------------- Run Loop -----------------
     def run(self, cb: CloneCallbacks) -> CloneResult:
@@ -171,9 +226,15 @@ class AutoRetryManager:
             last_result = result
             if attempt == self.max_attempts-1:
                 break  # exhausted attempts
-            # Adjust configuration for next attempt
-            current_cfg = self._heuristic_adjust(current_cfg, attempt, last_result, buffered_cb)
-            current_cfg = self._call_ai(current_cfg, attempt, buffered_cb, buffered_cb)
+            # AI-first adjustment path
+            new_cfg, applied_ai, raw_ai = self._call_ai(current_cfg, attempt, buffered_cb, buffered_cb)
+            if applied_ai:
+                current_cfg = new_cfg
+            else:
+                # Fallback heuristics only if AI produced nothing (avoid conflicting deltas)
+                current_cfg = self._heuristic_adjust(current_cfg, attempt, last_result, buffered_cb)
+                # Emit an explicit event indicating heuristic fallback used
+                self._emit({'event':'auto_retry_fallback_heuristic','attempt':attempt+1})
             # Small backoff to avoid immediate hammering
             time.sleep(1.2)
         # All attempts failed – return last result (or fabricate minimal failure)
