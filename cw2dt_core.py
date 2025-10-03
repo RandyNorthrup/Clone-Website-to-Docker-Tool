@@ -1734,6 +1734,35 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
         if cfg.disable_js:
             parts.append('    add_header Content-Security-Policy "script-src \'none\'; frame-src \'none\'" always;\n')
         parts.append('    location / { try_files $uri $uri/ =404; }\n'); parts.append('}\n'); f.write(''.join(parts))
+    # Validate nginx.conf correctness (structure & key directives)
+    try:
+        conf_path=os.path.join(output_folder,'nginx.conf')
+        with open(conf_path,'r',encoding='utf-8',errors='ignore') as _cf: conf_txt=_cf.read()
+        issues=[]; warnings=[]
+        def _expect(fragment, desc):
+            if fragment not in conf_txt:
+                issues.append(f"missing {desc} ({fragment})")
+        _expect(f"listen {int(cfg.container_port)};","listen directive")
+        _expect('root /usr/share/nginx/html;','root directive')
+        _expect('index index.html;','index directive')
+        _expect('location / { try_files $uri $uri/ =404; }','location try_files rule')
+        if cfg.disable_js and 'Content-Security-Policy' not in conf_txt:
+            warnings.append('CSP header expected (disable_js enabled)')
+        if not issues and not warnings:
+            log('[nginx] config validated')
+            j('nginx_validation', ok=True)
+        else:
+            if issues:
+                log('[nginx] validation issues: ' + '; '.join(issues))
+            if warnings:
+                log('[nginx] validation warnings: ' + '; '.join(warnings))
+            j('nginx_validation', ok=not issues, issues=issues or None, warnings=warnings or None)
+    except Exception as e:  # non-fatal
+        try:
+            log(f"[nginx] validation skipped: {e}")
+            j('nginx_validation', ok=False, error=str(e))
+        except Exception:
+            pass
     docker_success=False; t_build_start=None; t_build_end=None
     if cfg.build:
         if not docker_available():
