@@ -1747,6 +1747,63 @@ def clone_site(cfg: CloneConfig, callbacks: Optional[CloneCallbacks] = None) -> 
             log(f"[js] stripped <script> from {stripped}/{scanned} HTML files (external={scripts_removed} inline={inline_removed})")
         except Exception as e:
             log(f"[js] strip failed: {e}")
+
+    # Post-processing link rewrite: convert absolute internal https://host/... links to relative paths (/...)
+    # This ensures navigation in the local clone (served or inside container) stays on the cloned content.
+    rewrite_internal_links_stats={'processed':0,'rewritten':0}
+    if getattr(cfg,'rewrite_urls',True):
+        try:
+            from urllib.parse import urlparse as _urlparse
+            origin_parts=_urlparse(cfg.url)
+            origin_host=origin_parts.netloc.lower()
+            internal_hosts={origin_host}
+            if origin_host.startswith('www.'):
+                internal_hosts.add(origin_host[4:])
+            else:
+                internal_hosts.add('www.'+origin_host)
+            # helper regex for attributes (href/src/action) & CSS url()
+            import re as _re
+            attr_pattern=_re.compile(r'(href|src|action)=("|\')(https?:)?//([^/\">\']+)(/[^\"\'> ]*)?("|\')', _re.IGNORECASE)
+            css_url_pattern=_re.compile(r'url\(("|\')?(https?:)?//([^/\)"\']+)(/[^\)"\']*)("|\')?\)', _re.IGNORECASE)
+            for base,_,files in os.walk(site_root):
+                for fn in files:
+                    if not fn.lower().endswith(('.html','.htm','.css')): continue
+                    p=os.path.join(base,fn)
+                    try:
+                        with open(p,'r',encoding='utf-8',errors='ignore') as f: txt=f.read()
+                    except Exception:
+                        continue
+                    original=txt
+                    def _attr_sub(m):
+                        full_host=m.group(4).lower()
+                        path=m.group(5) or '/'
+                        if full_host in internal_hosts:
+                            repl=f"{m.group(1)}={m.group(2)}{path}{m.group(6)}"
+                            rewrite_internal_links_stats['rewritten']+=1
+                            return repl
+                        return m.group(0)
+                    txt=attr_pattern.sub(_attr_sub, txt)
+                    def _css_sub(m):
+                        full_host=m.group(3).lower(); path=m.group(4) or '/'
+                        if full_host in internal_hosts:
+                            rewrite_internal_links_stats['rewritten']+=1
+                            return f"url({path})"
+                        return m.group(0)
+                    # Only apply css_url_pattern for .css or inline styles in html
+                    if fn.lower().endswith('.css') or 'url(' in txt:
+                        txt=css_url_pattern.sub(_css_sub, txt)
+                    if txt!=original:
+                        try:
+                            with open(p,'w',encoding='utf-8') as f: f.write(txt)
+                        except Exception:
+                            pass
+                    rewrite_internal_links_stats['processed']+=1
+            log(f"[rewrite] internal link rewrite complete: files={rewrite_internal_links_stats['processed']} updated={rewrite_internal_links_stats['rewritten']}")
+            j('rewrite_links', processed=rewrite_internal_links_stats['processed'], rewritten=rewrite_internal_links_stats['rewritten'])
+        except Exception as e:
+            log(f"[rewrite] internal link rewrite skipped: {e}")
+            try: j('rewrite_links', error=str(e))
+            except Exception: pass
     # Dockerfile & nginx.conf
     rel_root = os.path.relpath(site_root, output_folder)
     with open(os.path.join(output_folder,'Dockerfile'),'w',encoding='utf-8') as f:
