@@ -122,7 +122,9 @@ class ChatAssistantDialog(QDialog):
         self._last_changes=None
         self._last_risks={}
         self._consec_stream_errors=0
-        self._dynamic_free_models=list(FREE_MODELS)
+        self._dynamic_free_models=[]
+        self._dynamic_free_models_display=[]
+        self._dynamic_free_models_map={}
         self._build_ui()
         self._start_background_poller()
 
@@ -130,7 +132,7 @@ class ChatAssistantDialog(QDialog):
     def _build_ui(self):
         lay=QVBoxLayout(self); lay.setContentsMargins(8,8,8,8); lay.setSpacing(6)
         top=QHBoxLayout(); top.setSpacing(8)
-        self.model_box=QComboBox(); self.model_box.addItems(self._dynamic_free_models)
+        self.model_box=QComboBox(); self.model_box.addItems([])
         # Ensure currently selected fallback is the validated DEFAULT_MODEL
         try:
             idx=self.model_box.findText(DEFAULT_MODEL)
@@ -141,9 +143,54 @@ class ChatAssistantDialog(QDialog):
         self.btn_refresh_models=QPushButton('Refresh Models')
         self.btn_refresh_models.setToolTip('Fetch current free models list from OpenRouter (filters zero-cost entries).')
         self.btn_refresh_models.clicked.connect(self._refresh_models_clicked)
+        self.btn_diag=QPushButton('Show Model Diagnostics')
+        self.btn_diag.setToolTip('Show current free model list and last response status.')
+        self.btn_diag.clicked.connect(self._show_model_diag)
         self.chk_auto=QCheckBox('Watch Mode (periodic log analysis)')
         self.btn_analyze=QPushButton('Analyze Recent Logs'); self.btn_analyze.clicked.connect(self._analyze_logs)
-        top.addWidget(QLabel('Model:')); top.addWidget(self.model_box,1); top.addWidget(self.btn_refresh_models); top.addWidget(self.chk_auto); top.addWidget(self.btn_analyze)
+        self.btn_verify_key=QPushButton('Verify API Key')
+        self.btn_verify_key.setToolTip('Test your OpenRouter API key and show result.')
+        self.btn_verify_key.clicked.connect(self._verify_api_key)
+        top.addWidget(QLabel('Model:'))
+        top.addWidget(self.model_box,1)
+        top.addWidget(self.btn_refresh_models)
+        top.addWidget(self.btn_verify_key)
+        top.addWidget(self.btn_diag)
+        top.addWidget(self.chk_auto)
+        top.addWidget(self.btn_analyze)
+        lay.addLayout(top)
+        self.chat_view=QTextEdit(); self.chat_view.setReadOnly(True); lay.addWidget(self.chat_view,1)
+        inrow=QHBoxLayout(); self.input=QLineEdit(); self.input.setPlaceholderText('Ask a question or: suggest dynamic settings')
+        self.btn_send=QPushButton('Send'); self.btn_send.clicked.connect(self._send_user)
+        inrow.addWidget(self.input,1); inrow.addWidget(self.btn_send); lay.addLayout(inrow)
+        act=QHBoxLayout(); self.btn_apply=QPushButton('Apply Last Changes'); self.btn_apply.setEnabled(False); self.btn_apply.clicked.connect(self._apply_last)
+        self.chk_stream=QCheckBox('Streaming'); self.chk_stream.setChecked(True); self.chk_stream.stateChanged.connect(lambda s: self._toggle_stream(bool(s)))
+        self.chk_log=QCheckBox('Log Session')
+        self.status_lbl=QLabel('Ready'); self.status_lbl.setStyleSheet('color:#888;')
+        for w in (self.btn_apply,self.chk_stream,self.chk_log): act.addWidget(w)
+        act.addStretch(1); act.addWidget(self.status_lbl); lay.addLayout(act)
+        hint=QLabel('Responses may include a JSON Changes line; risk fields highlighted in amber.')
+        hint.setStyleSheet('color:#aaa; font-size:11px;'); lay.addWidget(hint)
+    def _verify_api_key(self):
+        api_key = self._api_key_getter() or os.getenv('OPENROUTER_API_KEY')
+        if not api_key:
+            self._log('[error] No API key (set OPENROUTER_API_KEY env or fill AI API Key field).')
+            return
+        self._log('[system] Verifying OpenRouter API key...')
+        def _do():
+            try:
+                headers = {'Authorization': f'Bearer {api_key}', 'HTTP-Referer': 'http://localhost/', 'X-Title': 'CW2DT Chat'}
+                import httpx
+                with httpx.Client(timeout=15) as client:
+                    resp = client.get('https://openrouter.ai/api/v1/models', headers=headers)
+                    if resp.status_code == 200:
+                        self._log('[system] API key is valid!')
+                    else:
+                        self._log(f'[error] API key test failed: HTTP {resp.status_code} – {resp.text[:200]}')
+            except Exception as e:
+                self._log(f'[error] API key test exception: {e}')
+        import threading
+        threading.Thread(target=_do, daemon=True).start()
         lay.addLayout(top)
         self.chat_view=QTextEdit(); self.chat_view.setReadOnly(True); lay.addWidget(self.chat_view,1)
         inrow=QHBoxLayout(); self.input=QLineEdit(); self.input.setPlaceholderText('Ask a question or: suggest dynamic settings')
@@ -158,6 +205,14 @@ class ChatAssistantDialog(QDialog):
         hint=QLabel('Responses may include a JSON Changes line; risk fields highlighted in amber.')
         hint.setStyleSheet('color:#aaa; font-size:11px;'); lay.addWidget(hint)
 
+    def _show_model_diag(self):
+        diag = '[ai][diag] Current free models:\n' + '\n'.join(self._dynamic_free_models)
+        if hasattr(self, '_last_model_status') and self._last_model_status:
+            diag += '\nLast model status:\n' + self._last_model_status
+        else:
+            diag += '\nNo recent model status.'
+        self._log(diag)
+
     # ---------- Helpers ----------
     def _set_status(self,msg:str):
         def _do():
@@ -171,8 +226,11 @@ class ChatAssistantDialog(QDialog):
 
     # ---------- Model Refresh ----------
     def _refresh_models_clicked(self):
+        self._set_status('Refreshing model list...')
+        self._log('[ai] refreshing model list...')
         api_key=self._api_key_getter() or os.getenv('OPENROUTER_API_KEY')
         if not api_key:
+            self._set_status('No API key for model refresh')
             self._log('[ai] cannot refresh models – no API key')
             return
         threading.Thread(target=self._refresh_free_models, args=(api_key,), daemon=True).start()
@@ -188,36 +246,71 @@ class ChatAssistantDialog(QDialog):
                 return
             js=resp.json()
             data=js.get('data') or []
-            free=[]
-            for item in data:
-                if not isinstance(item,dict):
-                    continue
-                mid=item.get('id') or item.get('name')
-                pricing=item.get('pricing') or {}
-                # Heuristic: treat model as free if prompt / completion price are 0 or missing
+            # Always show raw model data at the top of the chat view for diagnostics
+            try:
+                import pprint
+                raw_data = pprint.pformat(data)
+            except Exception as e:
+                raw_data = str(data)
+                print('[ai][error] pprint failed:', e)
+            # Print to terminal for diagnostics
+            print('[ai][diag] Raw model data from OpenRouter:\n' + raw_data[:8000])
+            # Insert at the top of the chat view for visibility
+            def _show_raw():
                 try:
-                    prompt_cost=float(str(pricing.get('prompt','0')).split()[0] or 0)
-                    comp_cost=float(str(pricing.get('completion','0')).split()[0] or 0)
+                    self.chat_view.insertPlainText('[ai][diag] Raw model data from OpenRouter:\n' + raw_data[:8000] + '\n')
+                except Exception as e:
+                    self._log('[ai][diag] Raw model data from OpenRouter:\n' + raw_data[:8000])
+                    print('[ai][error] chat_view insert failed:', e)
+            QTimer.singleShot(0, _show_raw)
+            free=[]
+            free_display=[]
+            free_map={}
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                mid = item.get('id') or item.get('name')
+                name = item.get('name', mid)
+                pricing = item.get('pricing') or {}
+                try:
+                    prompt_cost = float(str(pricing.get('prompt', '0')).strip())
+                    comp_cost = float(str(pricing.get('completion', '0')).strip())
                 except Exception:
-                    prompt_cost=comp_cost=0
-                if mid and prompt_cost==0 and comp_cost==0:
+                    prompt_cost = comp_cost = 0
+                if mid and prompt_cost == 0 and comp_cost == 0:
                     free.append(mid)
+                    disp = f"{name} ({mid})"
+                    free_display.append(disp)
+                    free_map[disp] = mid
             if not free:
                 self._log('[ai] model refresh yielded no zero-cost entries; keeping existing list')
                 return
             # Preserve currently selected if still present
             cur=self.model_box.currentText().strip()
             self._dynamic_free_models=free
+            self._dynamic_free_models_display=free_display
+            self._dynamic_free_models_map=free_map
             def _apply():
-                self.model_box.blockSignals(True)
-                self.model_box.clear(); self.model_box.addItems(self._dynamic_free_models)
-                if cur in self._dynamic_free_models:
-                    self.model_box.setCurrentText(cur)
-                else:
-                    self.model_box.setCurrentIndex(0)
-                self.model_box.blockSignals(False)
-                self._log(f'[ai] refreshed free models ({len(free)}): '+', '.join(self._dynamic_free_models[:6]) + (' …' if len(free)>6 else ''))
-            QTimer.singleShot(0,_apply)
+                print('[ai][debug] _apply called for dropdown update')
+                print(f'[ai][debug] [pre-update] Dropdown list: {self._dynamic_free_models_display}')
+                try:
+                    self.model_box.blockSignals(True)
+                    self.model_box.clear()
+                    self.model_box.addItems(self._dynamic_free_models_display)
+                    print(f'[ai][debug] [post-update] Dropdown count: {self.model_box.count()}')
+                    if self._dynamic_free_models_display:
+                        self.model_box.setCurrentIndex(0)
+                        self._log(f'[ai] refreshed free models ({len(free)}): '+', '.join(self._dynamic_free_models_display[:6]) + (' …' if len(free)>6 else ''))
+                    else:
+                        self._log('[ai][error] No free models available. Dropdown is empty.')
+                    self.model_box.blockSignals(False)
+                except Exception as e:
+                    print(f'[ai][error] Dropdown update failed: {e}')
+                    self._log(f'[ai][error] Dropdown update failed: {e}')
+            import threading
+            print(f'[ai][debug] Directly calling _apply for dropdown update (thread: {threading.current_thread().name}, visible: {self.isVisible()})')
+            _apply()
+            self._set_status('Model list refreshed')
         except Exception as e:
             self._log(f'[ai] model refresh error: {e}')
 
@@ -267,7 +360,23 @@ class ChatAssistantDialog(QDialog):
 
     # ---------- Interaction ----------
     def _log(self,text:str):
-        self.chat_view.append(text); self.chat_view.ensureCursorVisible(); self._maybe_log_transcript(text)
+        print(f'[ai][debug] _log called with text: {text[:200]}')
+        def _do():
+            try:
+                before = self.chat_view.toPlainText()
+                self.chat_view.append(text)
+                after = self.chat_view.toPlainText()
+                self.chat_view.ensureCursorVisible()
+                self._maybe_log_transcript(text)
+                print(f'[ai][debug] chat_view after append, last 200 chars: {after[-200:]}')
+                if after == before:
+                    print('[ai][debug] append did not update chat_view, using setPlainText fallback')
+                    new_content = before + ('\n' if before else '') + text
+                    self.chat_view.setPlainText(new_content)
+            except Exception as e:
+                print(f'[ai][error] GUI log failed: {e}')
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _do)
 
     def _send_user(self):
         p=self.input.text().strip()
@@ -287,29 +396,53 @@ class ChatAssistantDialog(QDialog):
 
     def _run_analysis(self, user_prompt: Optional[str], system_inject: Optional[str]=None):
         cfg, ctx_text=self._compose_context()
-        model=self.model_box.currentText().strip() or DEFAULT_MODEL
-        allowed=set(self._dynamic_free_models or FREE_MODELS)
+        disp_model = self.model_box.currentText().strip() or (self._dynamic_free_models_display[0] if self._dynamic_free_models_display else DEFAULT_MODEL)
+        model = self._dynamic_free_models_map.get(disp_model, self._dynamic_free_models[0] if self._dynamic_free_models else DEFAULT_MODEL)
+        allowed = set(self._dynamic_free_models or FREE_MODELS)
+        print(f'[ai][debug] Dropdown selected: "{disp_model}"')
+        print(f'[ai][debug] Mapped model ID: "{model}"')
         if model not in allowed:
-            # Hard guard: force back to DEFAULT_MODEL if somehow out-of-band value slips in
-            model = DEFAULT_MODEL
+            # Hard guard: force back to first dynamic free model if out-of-band value slips in
+            model = self._dynamic_free_models[0] if self._dynamic_free_models else DEFAULT_MODEL
             try: self._log('[system] model outside free allowlist; reverted to '+model)
             except Exception: pass
         api_key=self._api_key_getter() or os.getenv('OPENROUTER_API_KEY')
         if not api_key:
             self._log('[error] No API key (set OPENROUTER_API_KEY env or fill AI API Key field).'); return
         full=(system_inject+'\n' if system_inject else '') + (user_prompt or 'Provide a health assessment and improvements.') + '\n\nContext:\n'+ctx_text+'\nIf proposing config changes include final JSON line.'
+        print(f'[ai][debug] Chat payload: model={model}, prompt={user_prompt}, system_inject={system_inject}')
         threading.Thread(target=self._exec_request, args=(api_key, model, full), daemon=True).start()
 
     def _exec_request(self, api_key: str, model: str, user_content: str):
         self._set_status('Querying...')
+        print(f'[ai][debug] Sending request: model={model}, user_content={user_content[:100]}')
         if not self._streaming_enabled:
             try:
                 payload={'model':model,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}], 'temperature':0.2,'max_tokens':600}
                 headers={'Authorization':f'Bearer {api_key}','HTTP-Referer':'http://localhost/','X-Title':'CW2DT Chat'}
                 with httpx.Client(timeout=45) as client:
-                    resp=client.post(OPENROUTER_API,json=payload,headers=headers); data=resp.json()
+                    resp=client.post(OPENROUTER_API,json=payload,headers=headers)
+                    print(f'[ai][debug] Response status: {resp.status_code}')
+                    print(f'[ai][debug] Response body: {resp.text[:400]}')
+                    try:
+                        resp.raise_for_status()
+                    except Exception as e:
+                        self._log(f'[ai][error] HTTP {resp.status_code}: {e}\nResponse body: {resp.text[:800]}')
+                        self._process_response(f'[error] HTTP {resp.status_code}: {e}')
+                        return
+                    try:
+                        data=resp.json()
+                        print(f'[ai][debug] Parsed JSON: {json.dumps(data)[:400]}')
+                    except Exception as e:
+                        self._log(f'[ai][error] Failed to parse JSON: {e}\nRaw body: {resp.text[:800]}')
+                        self._process_response(f'[error] Failed to parse JSON: {e}')
+                        return
                 content=data.get('choices',[{}])[0].get('message',{}).get('content','')
+                print(f'[ai][debug] Extracted content: {content[:200]}')
+                if not content:
+                    self._log(f'[ai][error] No content in response. Full JSON: {json.dumps(data)[:800]}')
             except Exception as e:
+                self._log(f'[ai][error] Exception: {e}')
                 content=f'[error] {e}'
             self._process_response(content); return
         try:
@@ -320,30 +453,60 @@ class ChatAssistantDialog(QDialog):
                 with client.stream('POST',OPENROUTER_API,json=payload,headers=headers) as r:
                     status = getattr(r, 'status_code', None)
                     if status and status >=400:
+                        try:
+                            body = r.text if hasattr(r, 'text') else ''
+                            self._log(f'[ai][error] Streaming HTTP {status}. Response body: {body[:800]}')
+                        except Exception:
+                            pass
                         # Special handling for 402 (Payment Required / quota) – rotate to next free model automatically.
                         if status == 402:
                             try: self._log(f'[ai] model {model} returned HTTP 402 (payment/quota) – attempting alternate free model...')
                             except Exception: pass
                             rotated=False
-                            for alt in FREE_MODELS:
-                                if alt==model: continue
-                                try:
-                                    # Quick non-stream fallback for alternate model
-                                    payload_alt={'model':alt,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}], 'temperature':0.2,'max_tokens':600}
-                                    with httpx.Client(timeout=45) as c2:
-                                        resp2=c2.post(OPENROUTER_API,json=payload_alt,headers=headers)
-                                        if resp2.status_code==200:
-                                            data=resp2.json(); content=data.get('choices',[{}])[0].get('message',{}).get('content','')
-                                            if content:
-                                                try: self._log(f'[ai] switched to alternate free model: {alt}')
-                                                except Exception: pass
-                                                self._process_response(content)
-                                                rotated=True
-                                                break
-                                except Exception:
+                            rotated = False
+                            error_details = []
+                            self._last_model_status = ''
+                            for alt in self._dynamic_free_models:
+                                if alt == model:
                                     continue
+                                try:
+                                    payload_alt = {'model': alt, 'messages': [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': user_content}], 'temperature': 0.2, 'max_tokens': 600, 'quota': 1}
+                                    with httpx.Client(timeout=45) as c2:
+                                        resp2 = c2.post(OPENROUTER_API, json=payload_alt, headers=headers)
+                                        self._last_model_status += f'{alt}: HTTP {resp2.status_code}\n'
+                                        if resp2.status_code == 200:
+                                            try:
+                                                data = resp2.json()
+                                            except Exception as e:
+                                                self._log(f'[ai][error] Failed to parse JSON for {alt}: {e}\nRaw body: {resp2.text[:800]}')
+                                                error_details.append(f'{alt}: JSON parse error')
+                                                self._last_model_status += f'{alt}: JSON parse error\n'
+                                                continue
+                                            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                                            if content:
+                                                try:
+                                                    self._log(f'[ai] switched to alternate free model: {alt}')
+                                                except Exception:
+                                                    pass
+                                                self._last_model_status += f'{alt}: Success\n'
+                                                self._process_response(content)
+                                                rotated = True
+                                                break
+                                            else:
+                                                self._log(f'[ai][error] No content from {alt}. Full JSON: {json.dumps(data)[:800]}')
+                                                error_details.append(f'{alt}: No content')
+                                                self._last_model_status += f'{alt}: No content\n'
+                                        else:
+                                            self._log(f'[ai][error] HTTP {resp2.status_code} for {alt}. Body: {resp2.text[:800]}')
+                                            error_details.append(f'{alt}: HTTP {resp2.status_code}')
+                                            self._last_model_status += f'{alt}: HTTP {resp2.status_code}\n'
+                                except Exception as e:
+                                    self._log(f'[ai][error] Exception for {alt}: {e}')
+                                    error_details.append(f'{alt}: Exception {e}')
+                                    self._last_model_status += f'{alt}: Exception {e}\n'
                             if not rotated:
-                                self._process_response('[error] 402 on primary model and no alternate free model produced a response.')
+                                self._log('[ai][error] No response received from any free model. Details: ' + '; '.join(error_details))
+                                self._process_response('[error] No response received from any free model.\nDetails: ' + '; '.join(error_details))
                             return
                         else:
                             # 400/404 often indicate removed or invalid model id – rotate similar to 402 path
@@ -371,8 +534,10 @@ class ChatAssistantDialog(QDialog):
                                         with httpx.Client(timeout=45) as fcli:
                                             fresp=fcli.post(OPENROUTER_API,json={'model':model,'messages':[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':user_content}],'temperature':0.2,'max_tokens':600},headers=headers)
                                             detail=fresp.text[:800]
+                                            self._log(f'[ai][error] Non-stream fallback HTTP {fresp.status_code}. Body: {detail}')
                                             self._process_response(f'[error] streaming HTTP {status} (detail: {detail})')
-                                    except Exception:
+                                    except Exception as e:
+                                        self._log(f'[ai][error] Exception in non-stream fallback: {e}')
                                         self._process_response(f'[error] streaming HTTP {status}')
                                 return
                             self._process_response(f'[error] streaming HTTP {status}')
@@ -405,10 +570,14 @@ class ChatAssistantDialog(QDialog):
                                 self.chat_view.insertPlainText(d); self.chat_view.ensureCursorVisible(); self._set_status('Streaming...')
                             QTimer.singleShot(0,_upd)
                         else:
-                            # No token text; log diagnostic once per chunk type
-                            if js.get('choices'):
-                                try: self._log('[ai][stream] chunk w/out content keys')
+                            # No token text; show raw chunk for diagnostics
+                            raw_chunk = json.dumps(js)
+                            def _upd_raw():
+                                try:
+                                    from PySide6.QtGui import QTextCursor; self.chat_view.moveCursor(QTextCursor.MoveOperation.End)
                                 except Exception: pass
+                                self.chat_view.insertPlainText('[ai][stream][raw] ' + raw_chunk + '\n'); self.chat_view.ensureCursorVisible(); self._set_status('Streaming...')
+                            QTimer.singleShot(0, _upd_raw)
             final=self._stream_buffer; self._stream_buffer=''
             if not final:
                 # Fallback: re-run non-stream request to salvage a reply
@@ -435,24 +604,33 @@ class ChatAssistantDialog(QDialog):
             self._consec_stream_errors=0
 
     def _process_response(self, text: str):
-        changes=parse_ai_changes(text)
-        if changes:
-            self._last_changes=changes; self.btn_apply.setEnabled(True)
-        self._log(f'Assistant: {text}')
-        if changes:
-            self._log(f'[assistant] Parsed changes: {changes}')
+        print(f'[ai][debug] Processing response: {text[:400]}')
+        def _do():
+            changes=parse_ai_changes(text)
+            if changes:
+                self._last_changes=changes; self.btn_apply.setEnabled(True)
+            self._log(f'Assistant: {text}')
             try:
-                cfg=self._get_config(); risks=assess_change_risks(cfg, changes); self._last_risks=risks
-                if risks:
-                    self._log('[risk] '+', '.join(f"{k}: {v}" for k,v in risks.items()))
-                    if hasattr(self._owner,'on_ai_changes_risk'):
-                        try: self._owner.on_ai_changes_risk(changes, risks)
-                        except Exception: pass
-            except Exception: pass
-            try:
-                if hasattr(self._owner,'on_ai_proposed_changes'): self._owner.on_ai_proposed_changes(changes)
-            except Exception: pass
-        self._set_status('Done')
+                from PySide6.QtGui import QTextCursor
+                self.chat_view.moveCursor(QTextCursor.MoveOperation.End)
+                self.chat_view.ensureCursorVisible()
+            except Exception as e:
+                print(f'[ai][error] chat_view scroll failed: {e}')
+            if changes:
+                self._log(f'[assistant] Parsed changes: {changes}')
+                try:
+                    cfg=self._get_config(); risks=assess_change_risks(cfg, changes); self._last_risks=risks
+                    if risks:
+                        self._log('[risk] '+', '.join(f"{k}: {v}" for k,v in risks.items()))
+                        if hasattr(self._owner,'on_ai_changes_risk'):
+                            try: self._owner.on_ai_changes_risk(changes, risks)
+                            except Exception: pass
+                except Exception: pass
+                try:
+                    if hasattr(self._owner,'on_ai_proposed_changes'): self._owner.on_ai_proposed_changes(changes)
+                except Exception: pass
+            self._set_status('Done')
+        QTimer.singleShot(0, _do)
 
     def _apply_last(self):
         if not self._last_changes: return
